@@ -173,21 +173,81 @@ async def upload_assets(
     return {"created": results}
 
 
+ASSET_STATUSES = ("active", "deleted")
+SEARCH_MODES = ("keyword", "semantic")
+
+
+def _check_query_args(status: str, sort: str, mode: Optional[str] = None) -> None:
+    """Reject values the storage layer has no meaning for.
+
+    Paging itself is validated by FastAPI (``ge``/``le`` constraints return a
+    422 with a field-level message); a page past the end is legal and simply
+    returns an empty page plus the real total.
+    """
+    if status not in ASSET_STATUSES:
+        raise HTTPException(400, f"status must be one of: {', '.join(ASSET_STATUSES)}")
+    if sort not in search.SORTS:
+        raise HTTPException(400, f"sort must be one of: {', '.join(search.SORTS)}")
+    if mode is not None and mode not in SEARCH_MODES:
+        raise HTTPException(400, f"mode must be one of: {', '.join(SEARCH_MODES)}")
+
+
 @app.get("/api/assets")
 def list_assets(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    tags: Optional[list[str]] = Query(None, description="Repeat for AND semantics"),
+    exclude_tags: Optional[list[str]] = Query(None, description="Any match excludes"),
     collection_id: Optional[int] = None,
     status: str = "active",
     sort: str = "newest",
     mode: str = "keyword",
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(search.DEFAULT_PAGE_SIZE, ge=1, le=search.MAX_PAGE_SIZE),
     user: dict = Depends(require_user),
 ):
-    return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+    _check_query_args(status, sort, mode)
+    return search.search(q=q, media_type=media_type, tag=tag, tags=tags,
+                         exclude_tags=exclude_tags, collection_id=collection_id,
+                         status=status, sort=sort, mode=mode,
+                         limit=page_size, offset=(page - 1) * page_size)
+
+
+@app.get("/api/assets/export.csv")
+def export_assets(
+    request: Request,
+    q: str = "",
+    media_type: Optional[str] = None,
+    tag: Optional[str] = None,
+    tags: Optional[list[str]] = Query(None),
+    exclude_tags: Optional[list[str]] = Query(None),
+    collection_id: Optional[int] = None,
+    status: str = "active",
+    sort: str = "newest",
+    user: dict = Depends(require_user),
+):
+    """CSV of *every* matching asset, with the same filters and ordering as the
+    list endpoint. Pagination parameters are accepted and ignored on purpose:
+    an export must not be limited to the page the operator is looking at."""
+    _check_query_args(status, sort)
+    text = search.export_csv(q=q, media_type=media_type, tag=tag, tags=tags,
+                             exclude_tags=exclude_tags, collection_id=collection_id,
+                             status=status, sort=sort)
+    rows = max(text.count("\r\n") - 1, 0)
+    stamp = now_iso().replace("-", "").replace(":", "")[:15]
+    filename = f"assets-{stamp}.csv"
+    log("asset.export", user=user, target_type="asset_export",
+        detail=f"{filename} rows={rows}", ip=client_ip(request))
+    return Response(
+        content=text.encode("utf-8-sig"),  # BOM so Excel detects UTF-8
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
 
 
 def _get_asset_or_404(uuid: str) -> dict:
