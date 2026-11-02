@@ -69,7 +69,8 @@ $("#search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { state.page = 1; loadLibrary(); }, 250);
 });
-$("#search-mode").addEventListener("change", (e) => { state.mode = e.target.value; state.page = 1; loadLibrary(); });
+// Semantic ranking is still available on the API (mode=semantic) but is not
+// offered here: it ranks by similarity, so it would ignore the sort control.
 $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; state.page = 1; loadLibrary(); });
 $("#page-size").addEventListener("change", (e) => { state.pageSize = +e.target.value; state.page = 1; loadLibrary(); });
 $("#page-prev").addEventListener("click", () => { if (state.page > 1) { state.page -= 1; loadLibrary(); } });
