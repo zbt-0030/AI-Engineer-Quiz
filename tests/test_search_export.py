@@ -337,6 +337,22 @@ def test_export_carries_chinese_fields(catalog):
     assert rows[0]["tags"] == "tidal maps|潮汐记录"
 
 
+def test_export_keeps_tags_past_the_first_lookup_chunk():
+    """Tags are fetched 500 assets at a time; crossing that boundary must not
+    silently drop the tag column for later rows."""
+    conn = get_conn()
+    coll = _collection(conn, f"Chunk {uuid.uuid4().hex[:8]}")
+    total = 505
+    for i in range(total):
+        _asset(conn, title=f"Chunk asset {i:03d}", created_at="2026-07-01T00:00:00+00:00",
+               tags=["chunky"], collection_id=coll)
+    conn.commit()
+
+    rows = _export_rows(search.export_csv(collection_id=coll))
+    assert len(rows) == total
+    assert {r["tags"] for r in rows} == {"chunky"}
+
+
 # ---------------------------------------------------------------------------
 # 4. HTTP layer
 # ---------------------------------------------------------------------------
