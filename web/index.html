@@ -57,11 +57,11 @@
 
         <div id="facets" class="facets">
           <div class="facet-group">
-            <h4>Media type</h4>
+            <h4>Media type &middot; all assets</h4>
             <ul id="facet-media"></ul>
           </div>
           <div class="facet-group">
-            <h4>Top tags</h4>
+            <h4>Top tags &middot; all assets</h4>
             <ul id="facet-tags"></ul>
           </div>
         </div>
@@ -72,17 +72,46 @@
           <div class="view-head">
             <h2 id="result-title">Library</h2>
             <div class="view-controls">
-              <span id="active-filter" class="chip hidden"></span>
-              <select id="sort">
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-                <option value="name">Name</option>
-                <option value="largest">Largest</option>
+              <select id="sort" title="Sort order">
+                <option value="newest">Created &middot; newest first</option>
+                <option value="oldest">Created &middot; oldest first</option>
+                <option value="name">Title &middot; A to Z</option>
+                <option value="largest">Size &middot; largest first</option>
               </select>
+              <button id="btn-export" class="btn">Export CSV</button>
             </div>
           </div>
+
+          <section class="filters" aria-label="Filters">
+            <div class="filter-grid">
+              <label class="filter-field">Collection
+                <select id="f-collection"><option value="">Any collection</option></select>
+              </label>
+              <label class="filter-field">Must have all tags
+                <input id="f-include" list="tag-options" placeholder="tag, press Enter" autocomplete="off">
+              </label>
+              <label class="filter-field">Must not have tags
+                <input id="f-exclude" list="tag-options" placeholder="tag, press Enter" autocomplete="off">
+              </label>
+            </div>
+            <datalist id="tag-options"></datalist>
+            <div id="active-conditions" class="conditions"></div>
+          </section>
+
+          <div id="load-error" class="error-banner hidden" role="alert"></div>
           <div id="grid" class="grid"></div>
-          <div id="empty" class="empty hidden">No assets yet. Click Upload to get started.</div>
+          <div id="empty" class="empty hidden">No assets match these filters.</div>
+          <div class="pager">
+            <button id="page-prev" class="btn">Previous</button>
+            <span id="page-info" class="muted"></span>
+            <button id="page-next" class="btn">Next</button>
+            <select id="page-size" title="Page size">
+              <option value="12">12 / page</option>
+              <option value="24" selected>24 / page</option>
+              <option value="48">48 / page</option>
+              <option value="96">96 / page</option>
+            </select>
+          </div>
         </div>
 
         <div id="view-collections" class="view hidden">
