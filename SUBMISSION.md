@@ -18,7 +18,7 @@
 | 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 归一化到 `strip().lower()` 后去重 | `test_tags_are_case_insensitive`、`test_duplicate_tags_*` |
 | 同一标签同时包含和排除 → 空结果 | 两个子查询天然互斥 | `test_same_tag_included_and_excluded_is_empty` |
 | 页面展示生效条件、可修改可清除 | `#active-conditions` chip（单个删除）+ Clear all | 浏览器端到端 |
-| 保留素材类型筛选并应用于导出 | 侧栏 facet → `media_type` 参数，导出同一构造器 | `test_export_honours_media_type_filter` |
+| 保留素材类型筛选并应用于导出 | 侧栏 facet → `media_type` 参数，导出同一构造器 | `test_export_honours_media_type_filter`、端到端（点 `image` → chip `type: image` → 导出 30 行全为 image） |
 | 按创建时间升/降序，有关键词时也遵守 | `SORTS` + `order_by()`，不再强制 `bm25` | `test_sort_is_honoured_with_a_keyword` |
 | 上一页/下一页 + 匹配总数 + 自定每页条数 | `#page-prev/#page-next/#page-info/#page-size` | 端到端（2 页 / 14 条） |
 | 相同 `created_at` 不重不漏 | `ORDER BY created_at, a.id` | `test_pagination_is_stable_*` |
@@ -108,6 +108,8 @@ page errors  : none
 ```
 
 **边界行为**（同一浏览器自动化逐项断言，30 个演示素材、每页 24 条）：
+
+> 只跑 `scripts/seed_demo_catalog.py` 时库里是 30 个素材；按上面"运行与验证"先跑 `python -m keepstack seed` 再跑演示脚本则是 54 个（24 + 30），下面这轮自动化只跑了演示脚本，所以总数是 30。验收场景两种情况下都是 14 条 / 2 页（每页 12 条）。
 
 ```
 1. 登录后            : Page 1 / 2 · 30 matching assets
