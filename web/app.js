@@ -184,6 +184,7 @@ function renderConditions() {
     const el = document.createElement("button");
     el.type = "button"; el.className = "chip"; el.textContent = text;
     el.title = "Remove this condition";
+    el.setAttribute("aria-label", "Remove condition: " + text);
     el.addEventListener("click", () => { remove(); state.page = 1; loadLibrary(); });
     box.appendChild(el);
   });
@@ -216,15 +217,35 @@ function renderGrid(items, total) {
 }
 
 function renderFacets(facets) {
+  // The facet rows are the only way to reach media-type / tag filtering, so
+  // they have to be operable from the keyboard: a click handler on an <li>
+  // alone leaves keyboard users with no path to those filters.
+  const facetItem = (active, attr, value, label, count) => `
+    <li role="button" tabindex="0" aria-pressed="${active ? "true" : "false"}"
+        class="${active ? "active" : ""}" ${attr}="${esc(value)}"
+        aria-label="${esc(label)} (${count})">
+      <span>${esc(value)}</span><span class="count">${count}</span></li>`;
+
   $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${esc(m.value)}"><span>${esc(m.value)}</span><span class="count">${m.count}</span></li>`).join("");
+    facetItem(state.media === m.value, "data-media", m.value,
+      `Filter by media type ${m.value}`, m.count)).join("");
   $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
-    `<li class="${state.tags.includes(t.value)?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
-  $$("#facet-media li").forEach(li => li.addEventListener("click", () => {
+    facetItem(state.tags.includes(t.value), "data-tag", t.value,
+      `Filter by tag ${t.value}`, t.count)).join("");
+
+  const activate = (li, run) => {
+    li.addEventListener("click", run);
+    li.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      run();
+    });
+  };
+  $$("#facet-media li").forEach(li => activate(li, () => {
     state.media = state.media === li.dataset.media ? null : li.dataset.media;
     state.page = 1; loadLibrary();
   }));
-  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => {
+  $$("#facet-tags li").forEach(li => activate(li, () => {
     const name = li.dataset.tag;
     state.tags = state.tags.includes(name)
       ? state.tags.filter(t => t !== name)
