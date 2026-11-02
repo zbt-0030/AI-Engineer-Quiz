@@ -6,6 +6,40 @@
 
 ---
 
+## 需求对照
+
+| 题目要求 | 实现位置 | 验证 |
+|---|---|---|
+| 关键词沿用现有 FTS 字段与分词；空白不限制 | `search._fts_query` + `build_query`（仍查 `asset_fts`，`porter unicode61`） | `test_blank_and_punctuation_*` |
+| 集合筛选 / 不限制集合 | `build_query` 的 `collection_assets` 子查询 | `test_combined_filters_intersect` |
+| 包含标签多个，必须全含 | `GROUP BY … HAVING COUNT(DISTINCT t.name) = n` | `test_include_tags_require_all_of_them` |
+| 排除标签多个，命中任一即排除 | `NOT IN (SELECT …)` | `test_exclude_tag_rejects_any_match` |
+| 各条件取交集、只返回 `active` | WHERE 全部 AND 拼接 + `a.status = ?` | `test_deleted_assets_never_surface` |
+| 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 归一化到 `strip().lower()` 后去重 | `test_tags_are_case_insensitive`、`test_duplicate_tags_*` |
+| 同一标签同时包含和排除 → 空结果 | 两个子查询天然互斥 | `test_same_tag_included_and_excluded_is_empty` |
+| 页面展示生效条件、可修改可清除 | `#active-conditions` chip（单个删除）+ Clear all | 浏览器端到端 |
+| 保留素材类型筛选并应用于导出 | 侧栏 facet → `media_type` 参数，导出同一构造器 | `test_export_honours_media_type_filter` |
+| 按创建时间升/降序，有关键词时也遵守 | `SORTS` + `order_by()`，不再强制 `bm25` | `test_sort_is_honoured_with_a_keyword` |
+| 上一页/下一页 + 匹配总数 + 自定每页条数 | `#page-prev/#page-next/#page-info/#page-size` | 端到端（2 页 / 14 条） |
+| 相同 `created_at` 不重不漏 | `ORDER BY created_at, a.id` | `test_pagination_is_stable_*` |
+| 改筛选或排序回到第 1 页 | 所有控件变更前置 `state.page = 1` | 端到端 |
+| 快速切换时结果对应最新条件 | `requestSeq` 自增序号，过期响应丢弃 | 代码审查 |
+| 空结果 / 加载失败 / 非法分页 / 特殊字符 | 空态文案、error banner、422/400、输入清洗 | `test_api_rejects_invalid_parameters` 等 |
+| 页面内 CSV 导出入口 | `#btn-export` | 端到端（下载 14 行） |
+| 导出全部匹配、筛选排序与列表一致、不受当前页限制 | `export_csv()` 复用 `build_query`，无 LIMIT | `test_export_contains_every_match_in_list_order`、端到端（`page=2` 仍导 14 行） |
+| 至少 7 个字段；多标签格式自定并说明 | `EXPORT_COLUMNS`，多标签用 `\|` 分隔并排序 | `test_export_*` |
+| 中文、逗号、引号、换行；零结果仍出表头 | `csv.writer` + `utf-8-sig`；先写表头 | `test_export_quotes_*`、`test_export_writes_header_only_*` |
+| 沿用登录鉴权、页面可下载、失败有提示 | `require_user` + Blob 下载 + `toast(..., "err")` | `test_export_endpoint_requires_auth` |
+| 仅导出信息清单，不含素材文件 | 只查 `assets` 表字段，不读 blob | `test_export_*` |
+| 通过已有入口改标题/描述/标签后查询与导出同步 | 既有 `PATCH /api/assets/{uuid}`、`POST …/tags` 已调用 `reindex_fts` | `test_edit_then_query_and_export_*` |
+| 保留应用与技术栈；新增组件说明收益成本 | 见下文「新增组件」 | — |
+| 只验收关键词搜索，可隐藏语义入口 | 页面不再暴露 `mode=semantic`，接口能力保留 | 端到端 |
+| facet 数字不联动，但不得误标为当前匹配数 | 侧栏标题标注 `all assets`，另有一行 `N matching assets` | 端到端截图 |
+| 补自动化测试 + 可复现数据 | `tests/test_search_export.py`、`scripts/seed_demo_catalog.py` | `pytest -q` |
+| 提交 fork 链接 / 分支 / commit SHA | 交付邮件中提供（fork 链接、分支 `feat/search-filter-export`、最终 commit SHA） | — |
+
+---
+
 ## 1. 运行与验证
 
 环境：Python 3.10+（本次实测 3.12.4）。依赖只有 fastapi / uvicorn / python-multipart / Pillow 与 pytest / httpx，无模型下载。
@@ -98,7 +132,16 @@ page errors  : none
 
 原生 JS，没有引入构建步骤或新依赖。筛选区三个控件（集合下拉、包含标签、排除标签，标签支持 datalist 补全 + 回车成 chip），生效条件以可删除 chip 回显并有 Clear all；排序下拉、上一页/下一页 + `Page X / Y · N matching assets` + 每页条数；改筛选或排序一律回到第 1 页；请求带自增序号，过期响应直接丢弃（快速切换条件时最终结果对应最新条件）；加载失败有 error banner，不残留旧结果；翻到超出范围时自动收敛到最后一页。
 
-**⑦ 未做的取舍**
+**⑦ 新增组件（收益 / 成本）**
+
+| 新增 | 收益 | 成本 |
+|---|---|---|
+| `GET /api/assets/export.csv` 路由 | 导出与列表共用一个构造器，一致性由结构保证；前端只多一个按钮 | 多一条路由（且必须声明在 `/api/assets/{uuid}` 之前）；导出为同步内存拼接 |
+| `build_query()` / `export_csv()` 两个函数 | 筛选语义只有一处定义，改条件不会两边漂移 | 参数组装比原来多一层间接，读代码要跟着跳一次 |
+| `scripts/seed_demo_catalog.py` | 验收场景可复现（30 个素材、4 种标签组合、含相同时间戳） | 仅开发期使用，运行时不加载；不进 `python -m keepstack` 的启动路径 |
+| 无新增第三方依赖、无新表、无迁移 | 干净环境按原 README 一条命令即可起 | — |
+
+**⑧ 未做的取舍**
 
 - 分页用 `LIMIT/OFFSET` 而不是 keyset：数据量与交互方式决定了 offset 足够，且实现更直观；数据量级上去以后应换 keyset（`created_at + id` 正好可以做游标）。
 - 语义搜索入口保留在后端（`mode=semantic`，现在也遵守新筛选条件），但页面上不再暴露——题目只验收关键词搜索。
