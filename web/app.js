@@ -205,11 +205,11 @@ function renderGrid(items, total) {
   $("#result-title").textContent = state.q.trim() ? `Results (${total})` : `Library (${total})`;
   $("#empty").classList.toggle("hidden", items.length > 0);
   $("#grid").innerHTML = items.map(a => `
-    <div class="card" data-uuid="${a.uuid}">
+    <div class="card" data-uuid="${esc(a.uuid)}">
       <img class="thumb" loading="lazy" src="/api/assets/${a.uuid}/thumb" alt="${esc(a.alt_text || a.title)}">
       <div class="meta">
         <span class="title" title="${esc(a.title)}">${esc(a.title)}</span>
-        <span class="sub"><span class="badge">${a.media_type}</span><span>${fmtBytes(a.size)}</span></span>
+        <span class="sub"><span class="badge">${esc(a.media_type)}</span><span>${fmtBytes(a.size)}</span></span>
       </div>
     </div>`).join("");
   $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
@@ -217,7 +217,7 @@ function renderGrid(items, total) {
 
 function renderFacets(facets) {
   $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${m.value}"><span>${m.value}</span><span class="count">${m.count}</span></li>`).join("");
+    `<li class="${state.media===m.value?'active':''}" data-media="${esc(m.value)}"><span>${esc(m.value)}</span><span class="count">${m.count}</span></li>`).join("");
   $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
     `<li class="${state.tags.includes(t.value)?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
   $$("#facet-media li").forEach(li => li.addEventListener("click", () => {
@@ -263,19 +263,32 @@ $("#btn-export").addEventListener("click", async () => {
 
 // ---------- asset detail drawer ----------
 const drawer = $("#drawer");
+let assetSeq = 0;                       // stale-response guard, like requestSeq
 $("#drawer-close").addEventListener("click", closeDrawer);
 $(".drawer-backdrop").addEventListener("click", closeDrawer);
-function closeDrawer() { drawer.classList.add("hidden"); document.body.classList.remove("modal-open"); }
+function closeDrawer() { assetSeq++; drawer.classList.add("hidden"); document.body.classList.remove("modal-open"); }
 
 async function openAsset(uuid) {
+  const seq = ++assetSeq;
   drawer.classList.remove("hidden");
   document.body.classList.add("modal-open");
   $("#drawer-body").innerHTML = '<p class="muted">Loading...</p>';
-  const [d, meta, sim] = await Promise.all([
-    api("/api/assets/" + uuid),
-    api("/api/assets/" + uuid + "/metadata"),
-    api("/api/assets/" + uuid + "/similar"),
-  ]);
+  let d, meta, sim;
+  try {
+    [d, meta, sim] = await Promise.all([
+      api("/api/assets/" + uuid),
+      api("/api/assets/" + uuid + "/metadata"),
+      api("/api/assets/" + uuid + "/similar"),
+    ]);
+  } catch (err) {
+    // Without this the drawer sits on "Loading..." forever and the failure
+    // only shows up as an unhandled rejection in the console.
+    if (seq !== assetSeq) return;
+    $("#drawer-body").innerHTML =
+      `<p class="error-banner">Could not load this asset: ${esc(err.message || err)}</p>`;
+    return;
+  }
+  if (seq !== assetSeq) return;   // a newer click (or a close) already won
   const a = d.asset;
   const canEdit = ["admin","editor","contributor"].includes(state.user.role);
   const preview = a.media_type === "image"
