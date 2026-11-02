@@ -55,19 +55,20 @@ def _fts_query(q: str) -> str:
 
 
 def normalize_tag_list(values: Optional[Iterable[str]]) -> list[str]:
-    """Trim, lower-case, de-duplicate; comma-separated input is accepted.
+    """Trim, lower-case, de-duplicate. One value is one complete tag name.
 
-    Tag names are stored lower-cased by the write path, so normalising here
-    keeps filtering consistent with the existing case handling.
+    The requirement is "match by full tag name", so a comma is part of the
+    name rather than a separator: a tag stored as ``night,shift`` is only
+    reachable by asking for ``night,shift``. Callers that want two tags pass
+    two values (``?tags=a&tags=b``).
     """
     out: list[str] = []
     seen: set[str] = set()
     for value in values or []:
-        for part in str(value).split(","):
-            name = part.strip().lower()
-            if name and name not in seen:
-                seen.add(name)
-                out.append(name)
+        name = str(value).strip().lower()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
     return out
 
 
@@ -120,7 +121,10 @@ def build_query(
         where.append("a.media_type = ?")
         params.append(media_type)
 
-    if collection_id:
+    if collection_id is not None:
+        # ``is not None`` rather than a truthiness test: an id that cannot
+        # exist (0, or a negative) must mean "no such collection" and return
+        # nothing, not silently widen to the whole catalog.
         where.append("a.id IN (SELECT ca.asset_id FROM collection_assets ca "
                      "WHERE ca.collection_id = ?)")
         params.append(collection_id)

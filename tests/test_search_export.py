@@ -28,6 +28,8 @@ from keepstack import search  # noqa: E402
 from keepstack.app import app  # noqa: E402
 from keepstack.db import get_conn, init_db  # noqa: E402
 
+init_db()   # tests that touch the DB directly must not depend on fixture order
+
 SHARED_TS = "2026-01-01T00:00:00+00:00"   # same format the app writes
 
 
@@ -320,6 +322,39 @@ def test_tag_with_a_space_matches_by_full_name(catalog):
     hit = search.search(tags=["tidal maps"], collection_id=catalog["i18n"])
     assert [i["uuid"] for i in hit["items"]] == [catalog["cjk"]["uuid"]]
     assert search.search(tags=["tidal"], collection_id=catalog["i18n"])["total"] == 0
+
+
+def test_tag_containing_a_comma_is_one_name_not_two():
+    """A comma belongs to the tag name; it is not a separator.
+
+    The write path stores whatever name it is given, so ``night,shift`` is a
+    legal tag. Splitting the filter value on commas would make that tag
+    impossible to select by its full name.
+    """
+    conn = get_conn()
+    coll = _collection(conn, f"Comma {uuid.uuid4().hex[:8]}")
+    _asset(conn, title="Comma tagged", created_at=SHARED_TS,
+           tags=["night,shift", "night", "shift"], collection_id=coll)
+    conn.commit()
+
+    exact = search.search(tags=["night,shift"], collection_id=coll)
+    assert exact["total"] == 1
+    # Two separate requests for the parts are not the same thing.
+    assert search.search(tags=["night,shift", "shift"], collection_id=coll)["total"] == 1
+    # And an HTTP round trip keeps the encoded comma intact.
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        client.headers.update({"Authorization": "Bearer " + login.json()["token"]})
+        res = client.get("/api/assets", params={"tags": "night,shift", "collection_id": coll})
+    assert res.status_code == 200
+    assert res.json()["total"] == 1
+
+
+def test_unknown_collection_id_returns_nothing(catalog):
+    """An id that cannot exist must not silently widen to the whole catalog."""
+    assert search.search(collection_id=0)["total"] == 0
+    assert search.search(collection_id=-7)["total"] == 0
+    assert search.export_csv(collection_id=0).count("\r\n") == 1   # header only
 
 
 def test_ordering_is_chronological_across_sub_second_values(catalog):
