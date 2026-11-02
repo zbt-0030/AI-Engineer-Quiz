@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import io
+import unicodedata
 from typing import Iterable, Optional, Sequence
 
 from . import ai
@@ -54,6 +55,18 @@ def _fts_query(q: str) -> str:
     return " ".join(f'"{t}"*' for t in terms)
 
 
+def normalize_tag_name(value) -> str:
+    """Canonical form of one tag name: trimmed, lower-cased, NFC.
+
+    Lower-casing is the case handling the write path always used. NFC is added
+    because ``café`` can be one code point or ``e`` + a combining accent: the
+    two look identical on screen but are different strings to SQLite, so a tag
+    extracted from embedded metadata and the same tag typed into the filter box
+    could otherwise never match. Both sides now go through this function.
+    """
+    return unicodedata.normalize("NFC", str(value).strip().lower())
+
+
 def normalize_tag_list(values: Optional[Iterable[str]]) -> list[str]:
     """Trim, lower-case, de-duplicate. One value is one complete tag name.
 
@@ -65,7 +78,7 @@ def normalize_tag_list(values: Optional[Iterable[str]]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for value in values or []:
-        name = str(value).strip().lower()
+        name = normalize_tag_name(value)
         if name and name not in seen:
             seen.add(name)
             out.append(name)
@@ -379,19 +392,24 @@ def _facets(status: str) -> dict:
 
 
 def _card(a: dict) -> dict:
-    """Compact asset representation for grid/list views."""
+    """Compact asset representation for grid/list views.
+
+    Text fields are coerced to ``""`` rather than passed through as ``None``:
+    the CSV export already does that, and a JSON client should not have to
+    special-case a null title that the UI renders as an empty string anyway.
+    """
     return {
         "id": a["id"],
         "uuid": a["uuid"],
-        "title": a["title"],
-        "filename": a["filename"],
-        "media_type": a["media_type"],
-        "mime_type": a["mime_type"],
-        "ext": a["ext"],
+        "title": a["title"] or "",
+        "filename": a["filename"] or "",
+        "media_type": a["media_type"] or "",
+        "mime_type": a["mime_type"] or "",
+        "ext": a["ext"] or "",
         "size": a["size"],
         "width": a["width"],
         "height": a["height"],
-        "alt_text": a["alt_text"],
+        "alt_text": a["alt_text"] or "",
         "status": a["status"],
-        "created_at": a["created_at"],
+        "created_at": a["created_at"] or "",
     }

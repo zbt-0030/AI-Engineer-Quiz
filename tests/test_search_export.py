@@ -357,6 +357,59 @@ def test_unknown_collection_id_returns_nothing(catalog):
     assert search.export_csv(collection_id=0).count("\r\n") == 1   # header only
 
 
+def test_tag_names_are_normalised_to_nfc():
+    """``café`` spelled with a combining accent must match the composed form.
+
+    Tags arrive both from metadata parsing and from users typing into the
+    filter box; those two can disagree on unicode normal form while looking
+    identical, which SQLite treats as different strings.
+    """
+    assert search.normalize_tag_name("  Café ") == "caf\u00e9"
+    assert search.normalize_tag_name("cafe\u0301") == "caf\u00e9"
+
+    conn = get_conn()
+    coll = _collection(conn, f"Unicode {uuid.uuid4().hex[:8]}")
+    # Stored the way the write path stores it (canonical form).
+    _asset(conn, title="Accent tag", created_at=SHARED_TS,
+           tags=[search.normalize_tag_name("cafe\u0301")], collection_id=coll)
+    conn.commit()
+
+    assert search.search(tags=["caf\u00e9"], collection_id=coll)["total"] == 1
+    assert search.search(tags=["cafe\u0301"], collection_id=coll)["total"] == 1
+
+    # The write endpoint canonicalises too, so both spellings collapse to one row.
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        client.headers.update({"Authorization": "Bearer " + login.json()["token"]})
+        rows = client.get("/api/assets", params={"collection_id": coll}).json()["items"]
+        client.post(f"/api/assets/{rows[0]['uuid']}/tags", json={"name": "Cafe\u0301 R\u00e9sum\u00e9"})
+        names = [t["name"] for t in client.get("/api/tags").json()["tags"]]
+    assert "caf\u00e9 r\u00e9sum\u00e9" in names
+    assert "cafe\u0301 r\u00e9sum\u00e9" not in names
+
+
+def test_missing_text_fields_come_back_as_empty_strings(catalog):
+    """A null title must not reach the client as ``null`` while the export
+    prints it as an empty cell."""
+    conn = get_conn()
+    coll = _collection(conn, f"Nulls {uuid.uuid4().hex[:8]}")
+    cur = conn.execute(
+        """INSERT INTO assets (uuid, sha256, filename, mime_type, media_type, ext,
+                               size, title, description, alt_text, status,
+                               storage_key, created_at, updated_at)
+           VALUES (?,?,'bare.bin',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active',?,?,?)""",
+        (str(uuid.uuid4()), uuid.uuid4().hex, SHARED_TS, SHARED_TS, SHARED_TS))
+    conn.execute("INSERT INTO collection_assets (collection_id, asset_id, added_at) "
+                 "VALUES (?,?,?)", (coll, cur.lastrowid, SHARED_TS))
+    conn.commit()
+
+    item = search.search(collection_id=coll)["items"][0]
+    assert item["title"] == "" and item["media_type"] == "" and item["mime_type"] == ""
+    assert item["alt_text"] == "" and item["ext"] == ""
+    row = _export_rows(search.export_csv(collection_id=coll))[0]
+    assert row["title"] == "" and row["media_type"] == "" and row["tags"] == ""
+
+
 def test_ordering_is_chronological_across_sub_second_values(catalog):
     asc = search.search(collection_id=catalog["prec"], sort="oldest", limit=10)
     assert _uuids(asc) == [catalog["early"]["uuid"], catalog["late"]["uuid"]]

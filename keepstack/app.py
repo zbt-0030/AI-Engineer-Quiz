@@ -353,7 +353,7 @@ def asset_similar(uuid: str, user: dict = Depends(require_user)):
 def add_tag(uuid: str, request: Request, body: dict = Body(...),
             user: dict = Depends(require_role("contributor"))):
     a = _get_asset_or_404(uuid)
-    name = (body.get("name") or "").strip().lower()
+    name = search.normalize_tag_name(body.get("name") or "")
     if not name:
         raise HTTPException(400, "Tag name required")
     with transaction() as conn:
@@ -373,7 +373,8 @@ def remove_tag(uuid: str, name: str, user: dict = Depends(require_role("contribu
     with transaction() as conn:
         conn.execute(
             "DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = "
-            "(SELECT id FROM tags WHERE name = ?)", (a["id"], name.lower()))
+            "(SELECT id FROM tags WHERE name = ?)",
+            (a["id"], search.normalize_tag_name(name)))
     ingest.reindex_fts(a["id"])
     return {"ok": True}
 

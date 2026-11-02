@@ -17,11 +17,14 @@ from . import ai, metadata, ocr, storage, thumbnails
 from .audit import now_iso
 from .config import config
 from .db import get_conn, transaction
+from .search import normalize_tag_name
 
 
 def _set_tags(conn, asset_id: int, tags: list[tuple[str, float]], source: str) -> None:
     for name, confidence in tags:
-        name = name.strip().lower()
+        # Same canonical form the filter path uses, so a tag can never be
+        # written in a shape the query side cannot express.
+        name = normalize_tag_name(name)
         if not name:
             continue
         conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
