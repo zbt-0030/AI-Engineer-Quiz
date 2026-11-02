@@ -28,7 +28,7 @@ from keepstack import search  # noqa: E402
 from keepstack.app import app  # noqa: E402
 from keepstack.db import get_conn, init_db  # noqa: E402
 
-SHARED_TS = "2026-01-01T00:00:00Z"
+SHARED_TS = "2026-01-01T00:00:00+00:00"   # same format the app writes
 
 
 def _collection(conn, name: str) -> int:
@@ -83,21 +83,21 @@ def catalog():
 
     # --- filtering / ordering / export fixture -----------------------------
     flt = _collection(conn, f"Harbor campaign {suffix}")
-    a1 = _asset(conn, title=f"Harbor at dawn {suffix}", created_at="2026-02-01T09:00:00Z",
+    a1 = _asset(conn, title=f"Harbor at dawn {suffix}", created_at="2026-02-01T09:00:00+00:00",
                 tags=["approved", "campaign"], collection_id=flt)
-    a2 = _asset(conn, title=f"Harbor at dusk {suffix}", created_at="2026-02-02T09:00:00Z",
+    a2 = _asset(conn, title=f"Harbor at dusk {suffix}", created_at="2026-02-02T09:00:00+00:00",
                 tags=["approved", "campaign"], collection_id=flt)
-    a3 = _asset(conn, title=f"Harbor crane {suffix}", created_at="2026-02-03T09:00:00Z",
+    a3 = _asset(conn, title=f"Harbor crane {suffix}", created_at="2026-02-03T09:00:00+00:00",
                 tags=["approved", "campaign", "internal"], collection_id=flt)
-    a4 = _asset(conn, title=f"Harbor survey {suffix}", created_at="2026-02-04T09:00:00Z",
+    a4 = _asset(conn, title=f"Harbor survey {suffix}", created_at="2026-02-04T09:00:00+00:00",
                 tags=["approved"], collection_id=flt)
-    a5 = _asset(conn, title=f"Harbor notes {suffix}", created_at="2026-02-05T09:00:00Z",
+    a5 = _asset(conn, title=f"Harbor notes {suffix}", created_at="2026-02-05T09:00:00+00:00",
                 tags=["campaign"], collection_id=flt)
-    a6 = _asset(conn, title=f"Harbor internal memo {suffix}", created_at="2026-02-06T09:00:00Z",
+    a6 = _asset(conn, title=f"Harbor internal memo {suffix}", created_at="2026-02-06T09:00:00+00:00",
                 tags=["approved", "campaign", "internal"], collection_id=flt)
-    a7 = _asset(conn, title=f"Unrelated poster {suffix}", created_at="2026-02-07T09:00:00Z",
+    a7 = _asset(conn, title=f"Unrelated poster {suffix}", created_at="2026-02-07T09:00:00+00:00",
                 tags=["approved", "campaign"], collection_id=flt)
-    a8 = _asset(conn, title=f"Harbor archived {suffix}", created_at="2026-02-08T09:00:00Z",
+    a8 = _asset(conn, title=f"Harbor archived {suffix}", created_at="2026-02-08T09:00:00+00:00",
                 tags=["approved", "campaign"], collection_id=flt, status="deleted")
 
     # --- pagination fixture: seven assets sharing one created_at -----------
@@ -111,17 +111,30 @@ def catalog():
     # --- CSV quoting fixture ----------------------------------------------
     qc = _collection(conn, f"Quoting {suffix}")
     tricky = _asset(
-        conn, title=f'Dawn, "harbor" {suffix}', created_at="2026-03-01T09:00:00Z",
+        conn, title=f'Dawn, "harbor" {suffix}', created_at="2026-03-01T09:00:00+00:00",
         tags=["approved", "campaign"], collection_id=qc,
         description="He said \"hi\", then left\nsecond line 港口",
     )
+    # --- i18n fixture: Chinese text and a tag containing a space ----------
+    i18n = _collection(conn, f"I18n {suffix}")
+    cjk = _asset(conn, title=f"港口航拍 {suffix}", created_at="2026-04-01T09:00:00+00:00",
+                 tags=["潮汐记录", "tidal maps"], collection_id=i18n,
+                 description="上海港 潮汐 记录文档")
+
+    # --- precision fixture: same second, different fraction ---------------
+    prec = _collection(conn, f"Precision {suffix}")
+    early = _asset(conn, title=f"Fraction early {suffix}",
+                   created_at="2026-05-01T09:00:00+00:00", collection_id=prec)
+    late = _asset(conn, title=f"Fraction late {suffix}",
+                  created_at="2026-05-01T09:00:00.500000+00:00", collection_id=prec)
     conn.commit()
 
     yield {
         "suffix": suffix,
-        "flt": flt, "pg": pg, "qc": qc,
+        "flt": flt, "pg": pg, "qc": qc, "i18n": i18n, "prec": prec,
         "a1": a1, "a2": a2, "a3": a3, "a4": a4, "a5": a5, "a6": a6, "a7": a7, "a8": a8,
-        "pg_assets": pg_assets, "tricky": tricky,
+        "pg_assets": pg_assets, "tricky": tricky, "cjk": cjk,
+        "early": early, "late": late,
     }
 
 
@@ -292,6 +305,36 @@ def test_export_honours_media_type_filter(catalog):
     none = _export_rows(search.export_csv(collection_id=catalog["flt"], media_type="video"))
     assert len(image_only) == 7
     assert none == []
+
+
+def test_keyword_matches_chinese_token_prefix(catalog):
+    hit = search.search(q="港口", collection_id=catalog["i18n"])
+    assert [i["uuid"] for i in hit["items"]] == [catalog["cjk"]["uuid"]]
+    # unicode61 has no CJK word segmentation: a run of ideographs is a single
+    # token, so only a prefix of that token matches. That is the tokenizer the
+    # brief says to keep, so this is behaviour, not a bug.
+    assert search.search(q="航拍", collection_id=catalog["i18n"])["total"] == 0
+
+
+def test_tag_with_a_space_matches_by_full_name(catalog):
+    hit = search.search(tags=["tidal maps"], collection_id=catalog["i18n"])
+    assert [i["uuid"] for i in hit["items"]] == [catalog["cjk"]["uuid"]]
+    assert search.search(tags=["tidal"], collection_id=catalog["i18n"])["total"] == 0
+
+
+def test_ordering_is_chronological_across_sub_second_values(catalog):
+    asc = search.search(collection_id=catalog["prec"], sort="oldest", limit=10)
+    assert _uuids(asc) == [catalog["early"]["uuid"], catalog["late"]["uuid"]]
+    desc = search.search(collection_id=catalog["prec"], sort="newest", limit=10)
+    assert _uuids(desc) == list(reversed(_uuids(asc)))
+
+
+def test_export_carries_chinese_fields(catalog):
+    rows = _export_rows(search.export_csv(collection_id=catalog["i18n"]))
+    assert len(rows) == 1
+    assert rows[0]["title"].startswith("港口航拍")
+    assert rows[0]["description"] == "上海港 潮汐 记录文档"
+    assert rows[0]["tags"] == "tidal maps|潮汐记录"
 
 
 # ---------------------------------------------------------------------------
