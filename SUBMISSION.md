@@ -267,7 +267,7 @@ page errors  : none
 - **关键词搜索时排序失效**：上游 `order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, ...)`——只要有关键词就把 `sort` 参数整个忽略。
 - **无 tie-breaker 的分页**：`SORTS` 里每项只有一个表达式（如 `a.created_at DESC`），同一时间戳的素材跨页会重复或遗漏。
 - **特殊字符导致 500**：上游 `if q.strip():` 成立就拼 `asset_fts MATCH ?`，而 `_fts_query("!!!")` 清洗后是空串，`MATCH ''` 是 FTS5 语法错误。
-- **`status` / `sort` / `mode` 直接透传**：`status` 原样进 `WHERE a.status = ?`，`status=bogus` 静默返回 0 条、`status=deleted` 能读已删数据；`sort` 非法值静默回落到默认值。现在三者都做白名单校验，非法分页参数交给 FastAPI 返回 422。
+- **`status` / `sort` / `mode` 不做校验**：`status` 原样进 `WHERE a.status = ?`，传 `bogus` 静默返回 0 条（看着像"没有数据"而不是"参数错了"）；`sort` / `mode` 非法值静默落到默认分支。现在三者都是白名单（`status` 只收 `active` / `deleted`，默认 `active`），其余返回 400；非法分页参数交 FastAPI 返回 422。
 - **`if collection_id:` 用真值判断**：`collection_id=0` 会被当成"不限制集合"而返回整库，应该是"没有任何素材属于集合 0"→ 空结果。改为 `is not None`。
 - **详情抽屉请求失败时永远停在 "Loading..."**：`openAsset()` 三个请求并发且没有 catch，任何一次失败（断网 / 500 / 会话过期）只留下一个控制台未捕获异常，界面卡在加载态。现在把失败原因显示在抽屉里，并丢弃"更晚的点击或关闭之后才回来"的响应。
 - **标签名只做 `strip().lower()`**：同一个标签的合成（`café`）与分解（`cafe` + 组合重音）两种 Unicode 写法会被存成两条，且互相查不到。现在写入与过滤两侧都归一化到 NFC。
