@@ -42,7 +42,7 @@
 
 ## 1. 运行与验证
 
-环境：Python 3.10+（本次实测 3.12.4）。依赖只有 fastapi / uvicorn / python-multipart / Pillow 与 pytest / httpx，无模型下载。
+环境：Python 3.10+（本次实测 3.12.14）。依赖只有 fastapi / uvicorn / python-multipart / Pillow 与 pytest / httpx，无模型下载。注意测试用的是 `.[dev]` 里的 `httpx`：只装 `requirements.txt` 会在 `TestClient` 处报错，按题目给的 `uv pip install -e '.[dev]'` 装就不会。
 
 ```bash
 uv venv --python 3.12
@@ -80,34 +80,41 @@ uv run --no-sync python -m pytest -q
 
 ## 2. 实测结果
 
-**自动化测试**：`47 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 25 个用例在 `tests/test_search_export.py`。
+**自动化测试**：`48 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 26 个用例在 `tests/test_search_export.py`。
 
-同一套测试在**干净克隆 + 纯 `uv` 流程**下复跑（`uv venv --python 3.12` → `uv pip install -e '.[dev]'` → `uv run --no-sync python -m pytest -q`）：`47 passed, 2 skipped`。
+**干净克隆复现**（另起目录 `git clone` 本分支，完全按 README 的命令）：
 
-**页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost）：
+```
+uv venv --python 3.12
+uv pip install -e '.[dev]'
+KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false uv run --no-sync python -m pytest -q
+→ 48 passed, 2 skipped in 3.92s
+```
+
+**页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`）：
 
 ```
 login ok, cards on first paint: 24
 pager        : Page 1 / 2 · 14 matching assets
-conditions   : Matching: "harbor" × collection: Harbor Campaign 2026 × + approved × + campaign × − internal × Clear all
-page 1 titles: Harbor aerial view / Harbor night shift / Harbor bridge survey / ...
+conditions   : Matching: "harbor" + collection: Harbor Campaign 2026 + approved + campaign − internal Clear all
+page 1 titles: Harbor aerial view / Harbor night shift / Harbor bridge survey / Harbor grain silo / ...
 after next   : Page 2 / 2 · 14 matching assets
 page 2 titles: Harbor at dusk / Harbor at dawn
 overlap p1/p2: none
-download     : assets-20261102T083722.csv bom: True rows: 14
+download     : assets-20261102T084844.csv bom: True rows: 14
 header       : uuid,title,description,filename,media_type,tags,created_at
-first row    : af12e110-...,Harbor aerial view,,harbor_aerial_view.jpg,image,approved|campaign,2026-03-01T14:04:00+00:00
+first row    : 584705f2-...,Harbor aerial view,,harbor_aerial_view.jpg,image,approved|campaign,2026-03-01T14:04:00+00:00
 page errors  : none
 ```
 
-**边界行为**（同一浏览器自动化逐项断言）：
+**边界行为**（同一浏览器自动化逐项断言，30 个演示素材、每页 24 条）：
 
 ```
-1. 登录后            : Page 1 / 3 · 54 matching assets
+1. 登录后            : Page 1 / 2 · 30 matching assets
 2. 无结果            : 0 matching assets，空态文案可见，上一页/下一页均禁用
 3. 零结果导出        : 0 数据行 + 表头，UTF-8 BOM 正常
 4. 筛选生效          : Page 1 / 2 · 22 matching assets，chip 为 "harbor" / + approved
-5. 点 Clear all      : 54 matching assets，搜索框清空，条件区显示"无筛选"
+5. 点 Clear all      : 30 matching assets（Page 1 / 3，每页 12 条时），搜索框清空，条件区无 chip
 6. 请求失败          : error banner 可见，列表清空，翻页按钮禁用
 7. 恢复后            : banner 隐藏，结果恢复
 8. 连点 4 次排序     : 最终选中 oldest 且首条是 Harbor at dawn（旧响应没有覆盖）
@@ -115,16 +122,42 @@ page errors  : none
 10. 在第 2 页收窄条件: 自动回到第 1 页（18 条）
 ```
 
-**规模下的耗时**（5000 个素材、5000 条 FTS 记录、每素材 1–4 个标签，SQLite 单文件）：
+**HTTP 层对抗性排查**（脚本直连运行中的服务，22 个关键词 / 9 组分页参数 / 6 组全量遍历）：
+
+```
+分页参数   page=0 / -1 / abc、page_size=0 / -5 / 201 / abc  → 422（FastAPI 校验，含具体字段与原因）
+           page=999999 → 200 + 空列表 + 正确 total（前端会收敛到最后一页）
+关键词     " * ( ) - % \ {} NEAR AND "OR NOT" harbor* "harbor col:title 😀 港口
+           ' OR 1=1 -- 等 22 个输入 → 全部 200，无 500；纯符号按"不限制"处理
+枚举值     status=bogus / sort=bogus / mode=bogus → 400（status=deleted 合法，返回 0 条）
+全量遍历   sort=newest / oldest（含与 q=harbor 组合、media_type、标签组合）每页 7 条翻到底：
+           条数 == total == 去重后条数，且集合与导出完全一致（6 组全部 OK）
+导出       全部匹配 20 条 == 列表 total 20；media_type=video 导出行全部是 video
+鉴权       未登录导出 → 401
+```
+
+**中文与特殊字符往返**（改标题 → 搜索 → 导出，走真实 HTTP）：
+
+```
+改标题为  港口航拍, "试拍"\n第二行
+搜 港口   → 1 条命中     搜 港口航拍 → 1 条命中     搜 航拍 → 0 条（见"已知限制"）
+导出      1 行，BOM 正常，title 与原文逐字符一致（逗号、引号、换行都在）
+改回原标题后：搜 港口 → 0 条，搜 harbor → 原素材回到首位（FTS 随修改重建）
+```
+
+**规模下的耗时**（5000 个素材、5000 条 FTS 记录、每素材 1–4 个标签，SQLite 单文件，取 11 次的最小值）：
 
 | 操作 | 耗时 |
 |---|---|
-| 列表首页（无筛选） | 30 ms |
-| 关键词 + 双标签 + 排除 | 38–50 ms |
+| 列表首页（无筛选） | 18 ms |
+| 关键词 + 双标签 + 排除 | 39 ms |
 | 末页（offset 4976） | 33 ms |
-| 导出全部 5000 行（707 KB） | 45 ms |
+| 侧栏 facet 统计（每次列表请求都会算） | 7.6 ms |
+| 导出全部 5000 行（707 KB） | 39 ms |
 
 这里改了一处实现：FTS 原先用 `JOIN asset_fts ON rowid = a.id`，SQLite 会把 `assets`（status 覆盖索引）当外层、对每个候选行扫一次虚拟表，5000 条时 COUNT 要 **1.35 s**；改成 `a.id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH ?)` 后 MATCH 只跑一次、外层按主键回表，降到 **4 ms**。
+
+侧栏 facet 另占 7.6 ms（一次列表请求的 40%），因为它是全库聚合、且每次请求都算一遍。试过给 `asset_tags(tag_id)` 加索引，`EXPLAIN QUERY PLAN` 显示规划器仍走 `idx_assets_status` → `asset_tags` 自动索引，耗时不变（7.5 ms），所以没有为此改表结构；要再压就得给 facet 加失效缓存，代价是"改完立刻看得到"这条要求要额外保证，不值得。
 
 
 ---
@@ -193,7 +226,7 @@ page errors  : none
 
 ## 5. 测试覆盖
 
-`tests/test_search_export.py`（25 个用例，独立构造 19 个素材 + 5 个集合，互不污染）：
+`tests/test_search_export.py`（26 个用例，跑在独立的临时库上，每个用例自建素材与集合，互不污染）：
 
 - 组合筛选取交集：关键词 + 集合 + 双标签 + 排除标签 + 仅 `active`；
 - 包含标签必须全含、排除标签命中任一即排除、重复标签不影响结果、同一标签同时包含与排除返回空；
@@ -204,6 +237,7 @@ page errors  : none
 - 导出与列表逐行一致（含跨页拼接）、零结果只有表头、逗号/引号/换行/中文往返校验、`media_type` 筛选对导出同样生效；
 - 中文关键词按词元前缀命中；含空格的标签按完整名称匹配（`tidal` 不会匹配 `tidal maps`）；
 - 同一秒内不同微秒精度的两条记录，升/降序仍是时间序；
+- 超过 500 个素材的集合导出（标签按 500 一批回查，跨批不能丢标签列）；
 - HTTP 层：分页参数、401 未登录导出、`text/csv` + `attachment` + BOM、非法 `status/sort/mode` 返回 400；
 - 修改标题/描述后新的关键词能查到、加标签后组合筛选命中，且导出反映最新值（对应需求 4）。
 
