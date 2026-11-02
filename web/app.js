@@ -148,7 +148,11 @@ async function loadLibrary() {
 }
 
 function clearFilters() {
+  // Everything listed as a condition gets cleared, keyword included: the chip
+  // list is the single source of truth for what is currently narrowing results.
   state.media = null; state.collection = null; state.tags = []; state.excludeTags = [];
+  state.q = "";
+  $("#search").value = "";
   $("#f-collection").value = "";
   $("#f-include").value = ""; $("#f-exclude").value = "";
   state.page = 1;
