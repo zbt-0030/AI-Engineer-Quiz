@@ -42,7 +42,7 @@
 
 ## 1. 运行与验证
 
-环境：Python 3.10+（本次实测 3.12.4）。依赖只有 fastapi / uvicorn / python-multipart / Pillow，测试再多 pytest / httpx（`.[dev]`），无模型下载。注意测试用的是 `.[dev]` 里的 `httpx`：只装 `requirements.txt` 会在 `TestClient` 处报错，按题目给的 `uv pip install -e '.[dev]'` 装就不会。
+环境：Python 3.10+。两处实测：本机开发用的 venv 是 3.12.4，干净克隆里跑 `uv venv --python 3.12` 拉到的是 3.12.14，两边都是 52 passed / 2 skipped。依赖只有 fastapi / uvicorn / python-multipart / Pillow，测试再多 pytest / httpx（`.[dev]`），无模型下载。注意测试用的是 `.[dev]` 里的 `httpx`：只装 `requirements.txt` 会在 `TestClient` 处报错，按题目给的 `uv pip install -e '.[dev]'` 装就不会。
 
 ```bash
 uv venv --python 3.12
@@ -82,13 +82,27 @@ uv run --no-sync python -m pytest -q
 
 **自动化测试**：`52 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 30 个用例在 `tests/test_search_export.py`。
 
-**干净克隆复现**（另起目录 `git clone` 本分支，完全按 README 的命令）：
+**干净克隆复现**（另起目录从 GitHub `git clone` 本分支，完全按 README 的命令）：
 
 ```
+git clone --branch feat/search-filter-export https://github.com/zbt-0030/AI-Engineer-Quiz.git
 uv venv --python 3.12
 uv pip install -e '.[dev]'
 KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false uv run --no-sync python -m pytest -q
-→ 52 passed, 2 skipped in 4.08s
+→ 52 passed, 2 skipped in 4.46s        （耗时随机器浮动，早先一次是 4.08s）
+```
+
+**同一个克隆里起真服务再验一遍**（`python -m keepstack` + curl 直连，不看 TestClient）：
+
+```
+clone HEAD                 : b2b4049  == 远端 feat/search-filter-export
+GET / 、/app.js、/styles.css: 200、200 (24 KB)、200 (17 KB)
+登录                       : token 99 chars
+验收场景 list              : total 14 / items 14 / 首条 Harbor at dawn（oldest first）
+验收场景 export            : 200, 1875 B, BOM ✔, 14 数据行, 表头 7 列
+每页 12 条                 : page1 12 条 / page2 2 条 / page3 0 条（total 恒为 14）
+导出带 page=2&page_size=5  : 仍是 14 行（分页参数对导出无效）
+导出不带 token → 401；page=0 → 422；sort=bogus → 400；q=!!! → 200
 ```
 
 **页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`；脚本未提交进仓库，原因见本节末尾）：
