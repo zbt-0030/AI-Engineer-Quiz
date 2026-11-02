@@ -1,33 +1,170 @@
-"""Search and discovery.
+"""Search, filtering, sorting, pagination and CSV export.
 
 Three complementary modes over one catalog:
 
   * keyword  - FTS5 full-text across title, description, tags, metadata
-  * filter   - faceted structured filters (media type, tag, status, dates)
+  * filter   - faceted structured filters (media type, collection, tags, status)
   * semantic - embedding cosine ranking ("natural language" / more-like-this)
 
-Facet counts are returned alongside results so the UI can render a live,
-drill-down sidebar.
+The list endpoint and the CSV export share :func:`build_query`. That is the
+whole point of the module: a page of results and an export can never disagree
+about *which* assets match or in *what* order they appear, because both are
+produced from one WHERE clause and one ORDER BY.
+
+Ordering always ends with a unique tie-breaker (``a.id``) so pagination stays
+stable when several assets share a ``created_at`` value.
 """
 from __future__ import annotations
 
-from typing import Optional
+import csv
+import io
+from typing import Iterable, Optional, Sequence
 
 from . import ai
 from .db import get_conn
 
+#: ``sort`` key -> (primary order, tie-breaker). The tie-breaker is unique per
+#: asset, so the total order is deterministic and pages cannot overlap.
 SORTS = {
-    "newest": "a.created_at DESC",
-    "oldest": "a.created_at ASC",
-    "name": "a.title ASC",
-    "largest": "a.size DESC",
+    "newest": ("a.created_at DESC", "a.id DESC"),
+    "oldest": ("a.created_at ASC", "a.id ASC"),
+    "name": ("a.title COLLATE NOCASE ASC", "a.id ASC"),
+    "largest": ("a.size DESC", "a.id ASC"),
 }
+DEFAULT_SORT = "newest"
+MAX_PAGE_SIZE = 200
+DEFAULT_PAGE_SIZE = 24
+
+#: Export schema. ``tags`` is TAG_SEPARATOR-joined and sorted by name.
+EXPORT_COLUMNS = ("uuid", "title", "description", "filename", "media_type",
+                  "tags", "created_at")
+TAG_SEPARATOR = "|"
 
 
 def _fts_query(q: str) -> str:
-    """Turn user text into a safe FTS5 prefix query."""
-    terms = [t for t in "".join(c if c.isalnum() or c.isspace() else " " for c in q).split() if t]
+    """Turn user text into a safe FTS5 prefix query.
+
+    Everything that is not alphanumeric becomes whitespace, so quotes,
+    asterisks, brackets and other FTS5 operators can never reach the parser as
+    syntax. Returns ``""`` when nothing searchable is left, which callers treat
+    as "no keyword constraint" instead of sending ``MATCH ''`` to SQLite.
+    """
+    cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in q)
+    terms = [t for t in cleaned.split() if t]
     return " ".join(f'"{t}"*' for t in terms)
+
+
+def normalize_tag_list(values: Optional[Iterable[str]]) -> list[str]:
+    """Trim, lower-case, de-duplicate; comma-separated input is accepted.
+
+    Tag names are stored lower-cased by the write path, so normalising here
+    keeps filtering consistent with the existing case handling.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        for part in str(value).split(","):
+            name = part.strip().lower()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+    return out
+
+
+def _coerce_tags(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return normalize_tag_list([value])
+    return normalize_tag_list(value)
+
+
+def build_query(
+    *,
+    q: str = "",
+    media_type: Optional[str] = None,
+    tags=None,
+    exclude_tags=None,
+    collection_id: Optional[int] = None,
+    status: str = "active",
+) -> tuple[list[str], list[str], list]:
+    """Build the shared FROM-joins, WHERE fragments and bind parameters.
+
+    All conditions intersect (AND). ``tags`` requires every listed tag
+    (``COUNT(DISTINCT tag) = n``), ``exclude_tags`` rejects an asset that
+    carries any of them.
+    """
+    include = _coerce_tags(tags)
+    exclude = _coerce_tags(exclude_tags)
+
+    joins: list[str] = []
+    where: list[str] = []
+    params: list = []
+
+    if status:
+        where.append("a.status = ?")
+        params.append(status)
+
+    match = _fts_query(q or "")
+    if match:
+        # FTS5 resolves MATCH against the table itself, so keep the real name
+        # rather than an alias here.
+        joins.append("JOIN asset_fts ON asset_fts.rowid = a.id")
+        where.append("asset_fts MATCH ?")
+        params.append(match)
+
+    if media_type:
+        where.append("a.media_type = ?")
+        params.append(media_type)
+
+    if collection_id:
+        where.append("a.id IN (SELECT ca.asset_id FROM collection_assets ca "
+                     "WHERE ca.collection_id = ?)")
+        params.append(collection_id)
+
+    if include:
+        marks = ",".join("?" * len(include))
+        where.append(
+            "a.id IN (SELECT at.asset_id FROM asset_tags at "
+            "JOIN tags t ON t.id = at.tag_id "
+            f"WHERE t.name IN ({marks}) "
+            "GROUP BY at.asset_id HAVING COUNT(DISTINCT t.name) = ?)"
+        )
+        params.extend(include)
+        params.append(len(include))
+
+    if exclude:
+        marks = ",".join("?" * len(exclude))
+        where.append(
+            "a.id NOT IN (SELECT at.asset_id FROM asset_tags at "
+            "JOIN tags t ON t.id = at.tag_id "
+            f"WHERE t.name IN ({marks}))"
+        )
+        params.extend(exclude)
+
+    return joins, where, params
+
+
+def _where_sql(where: Sequence[str]) -> str:
+    return " AND ".join(where) if where else "1 = 1"
+
+
+def order_by(sort: Optional[str]) -> str:
+    """ORDER BY for ``sort``; unknown keys fall back to newest-first."""
+    primary, tie_break = SORTS.get((sort or "").lower(), SORTS[DEFAULT_SORT])
+    return f"{primary}, {tie_break}"
+
+
+def _clamp(limit: int, offset: int) -> tuple[int, int]:
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_PAGE_SIZE
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    return max(1, min(limit, MAX_PAGE_SIZE)), max(0, offset)
 
 
 def search(
@@ -35,69 +172,143 @@ def search(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    tags=None,
+    exclude_tags=None,
     collection_id: Optional[int] = None,
     status: str = "active",
-    sort: str = "newest",
+    sort: Optional[str] = DEFAULT_SORT,
     mode: str = "keyword",
-    limit: int = 60,
+    limit: int = DEFAULT_PAGE_SIZE,
     offset: int = 0,
 ) -> dict:
-    conn = get_conn()
-
-    # Semantic mode ranks the candidate pool by embedding similarity.
-    if mode == "semantic" and q.strip():
-        return _semantic_search(q, media_type, status, limit, offset)
-
-    where = ["a.status = ?"]
-    params: list = [status]
-    join = ""
-
-    if q.strip():
-        join += " JOIN asset_fts f ON f.rowid = a.id"
-        where.append("asset_fts MATCH ?")
-        params.append(_fts_query(q))
-    if media_type:
-        where.append("a.media_type = ?")
-        params.append(media_type)
+    """Return one page of matching assets plus the total match count."""
+    limit, offset = _clamp(limit, offset)
+    include = _coerce_tags(tags)
     if tag:
-        join += (" JOIN asset_tags at ON at.asset_id = a.id"
-                 " JOIN tags t ON t.id = at.tag_id AND t.name = ?")
-        params.append(tag.lower())
-    if collection_id:
-        join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
-        params.append(collection_id)
+        include = normalize_tag_list([*include, tag])
 
-    where_sql = " AND ".join(where)
-    order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, SORTS["newest"])
+    if mode == "semantic" and q.strip():
+        return _semantic_search(q, include, exclude_tags, media_type,
+                                collection_id, status, limit, offset)
+
+    conn = get_conn()
+    joins, where, params = build_query(
+        q=q, media_type=media_type, tags=include, exclude_tags=exclude_tags,
+        collection_id=collection_id, status=status,
+    )
+    join_sql = " " + " ".join(joins) if joins else ""
+    where_sql = _where_sql(where)
 
     total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a{join} WHERE {where_sql}", params
+        f"SELECT COUNT(*) AS c FROM assets a{join_sql} WHERE {where_sql}", params
     ).fetchone()["c"]
 
     rows = conn.execute(
-        f"""SELECT a.* FROM assets a{join} WHERE {where_sql}
-            ORDER BY {order} LIMIT ? OFFSET ?""",
+        f"""SELECT a.* FROM assets a{join_sql} WHERE {where_sql}
+            ORDER BY {order_by(sort)} LIMIT ? OFFSET ?""",
         [*params, limit, offset],
     ).fetchall()
 
     return {
         "total": total,
         "items": [_card(dict(r)) for r in rows],
-        "facets": _facets(status),
+        "facets": _facets("active"),
         "mode": mode,
+        "page": offset // limit + 1,
+        "page_size": limit,
+        "sort": sort if (sort or "").lower() in SORTS else DEFAULT_SORT,
+        "filters": {
+            "q": q or "",
+            "media_type": media_type or "",
+            "collection_id": collection_id or None,
+            "tags": include,
+            "exclude_tags": _coerce_tags(exclude_tags),
+        },
     }
 
 
-def _semantic_search(q, media_type, status, limit, offset) -> dict:
+def export_csv(
+    *,
+    q: str = "",
+    media_type: Optional[str] = None,
+    tag: Optional[str] = None,
+    tags=None,
+    exclude_tags=None,
+    collection_id: Optional[int] = None,
+    status: str = "active",
+    sort: Optional[str] = DEFAULT_SORT,
+) -> str:
+    """Render every matching asset as CSV text.
+
+    Same filters, same ORDER BY, same join/where as :func:`search`, and no
+    LIMIT: an export always covers the whole result set, not one page. A header
+    row is written even when nothing matches.
+    """
+    include = _coerce_tags(tags)
+    if tag:
+        include = normalize_tag_list([*include, tag])
+
+    conn = get_conn()
+    joins, where, params = build_query(
+        q=q, media_type=media_type, tags=include, exclude_tags=exclude_tags,
+        collection_id=collection_id, status=status,
+    )
+    join_sql = " " + " ".join(joins) if joins else ""
+
+    rows = conn.execute(
+        f"""SELECT a.id, a.uuid, a.title, a.description, a.filename,
+                   a.media_type, a.created_at
+            FROM assets a{join_sql} WHERE {_where_sql(where)}
+            ORDER BY {order_by(sort)}""",
+        params,
+    ).fetchall()
+    tagged = _tags_for([r["id"] for r in rows])
+
+    buf = io.StringIO()
+    # csv.writer handles commas, quotes and embedded newlines; \r\n keeps
+    # Excel happy and is RFC 4180 compliant.
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(EXPORT_COLUMNS)
+    for r in rows:
+        writer.writerow([
+            r["uuid"], r["title"] or "", r["description"] or "", r["filename"] or "",
+            r["media_type"] or "", TAG_SEPARATOR.join(tagged.get(r["id"], [])),
+            r["created_at"] or "",
+        ])
+    return buf.getvalue()
+
+
+def _tags_for(asset_ids: Sequence[int]) -> dict[int, list[str]]:
+    """Tag names per asset, sorted, fetched in chunks to stay under SQLite's
+    parameter limit on large exports."""
+    conn = get_conn()
+    out: dict[int, list[str]] = {}
+    ids = list(asset_ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        for row in conn.execute(
+            "SELECT at.asset_id, t.name FROM asset_tags at "
+            "JOIN tags t ON t.id = at.tag_id "
+            f"WHERE at.asset_id IN ({marks}) ORDER BY t.name",
+            chunk,
+        ):
+            out.setdefault(row["asset_id"], []).append(row["name"])
+    return out
+
+
+def _semantic_search(q, include, exclude_tags, media_type, collection_id,
+                     status, limit, offset) -> dict:
     conn = get_conn()
     qvec = ai.embed(q)
-    where = ["status = ?", "embedding IS NOT NULL"]
-    params: list = [status]
-    if media_type:
-        where.append("media_type = ?")
-        params.append(media_type)
+    joins, where, params = build_query(
+        media_type=media_type, tags=include, exclude_tags=exclude_tags,
+        collection_id=collection_id, status=status,
+    )
+    where = [*where, "a.embedding IS NOT NULL"]
+    join_sql = " " + " ".join(joins) if joins else ""
     rows = conn.execute(
-        f"SELECT * FROM assets WHERE {' AND '.join(where)}", params
+        f"SELECT a.* FROM assets a{join_sql} WHERE {_where_sql(where)}", params
     ).fetchall()
     scored = []
     for r in rows:
@@ -110,7 +321,11 @@ def _semantic_search(q, media_type, status, limit, offset) -> dict:
         card = _card(dict(r))
         card["score"] = round(score, 4)
         items.append(card)
-    return {"total": len(scored), "items": items, "facets": _facets(status), "mode": "semantic"}
+    return {"total": len(scored), "items": items, "facets": _facets("active"),
+            "mode": "semantic", "page": offset // limit + 1, "page_size": limit,
+            "sort": DEFAULT_SORT,
+            "filters": {"q": q, "tags": include,
+                        "exclude_tags": _coerce_tags(exclude_tags)}}
 
 
 def more_like(asset_id: int, limit: int = 12) -> list[dict]:
@@ -134,6 +349,12 @@ def more_like(asset_id: int, limit: int = 12) -> list[dict]:
 
 
 def _facets(status: str) -> dict:
+    """Unfiltered catalog counts for the sidebar.
+
+    These are deliberately *not* the current match counts: the task allows
+    facets that do not narrow with the active filters, but they must not be
+    presented as "results matching now" in the UI.
+    """
     conn = get_conn()
     media = conn.execute(
         "SELECT media_type, COUNT(*) c FROM assets WHERE status = ? GROUP BY media_type ORDER BY c DESC",
@@ -149,6 +370,7 @@ def _facets(status: str) -> dict:
     return {
         "media_types": [{"value": r["media_type"], "count": r["c"]} for r in media],
         "tags": [{"value": r["name"], "count": r["c"]} for r in tags],
+        "scope": f"all {status} assets",
     }
 
 
