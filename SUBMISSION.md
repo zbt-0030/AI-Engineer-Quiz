@@ -80,9 +80,11 @@ uv run --no-sync python -m pytest -q
 
 ## 2. 实测结果
 
-**自动化测试**：`43 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 21 个用例在 `tests/test_search_export.py`。
+**自动化测试**：`47 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 25 个用例在 `tests/test_search_export.py`。
 
-**页面端到端**（Playwright 驱动本机 Chrome，1440×900，无代理直连 localhost）：
+同一套测试在**干净克隆 + 纯 `uv` 流程**下复跑（`uv venv --python 3.12` → `uv pip install -e '.[dev]'` → `uv run --no-sync python -m pytest -q`）：`47 passed, 2 skipped`。
+
+**页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost）：
 
 ```
 login ok, cards on first paint: 24
@@ -92,13 +94,38 @@ page 1 titles: Harbor aerial view / Harbor night shift / Harbor bridge survey / 
 after next   : Page 2 / 2 · 14 matching assets
 page 2 titles: Harbor at dusk / Harbor at dawn
 overlap p1/p2: none
-download     : assets-20261102T080629.csv bom: True rows: 14
+download     : assets-20261102T083722.csv bom: True rows: 14
 header       : uuid,title,description,filename,media_type,tags,created_at
-first row    : 40466041-...,Harbor aerial view,,harbor_aerial_view.jpg,image,approved|campaign,2026-03-07T12:00:00Z
+first row    : af12e110-...,Harbor aerial view,,harbor_aerial_view.jpg,image,approved|campaign,2026-03-01T14:04:00+00:00
 page errors  : none
 ```
 
-即：关键词 + 集合 + 标签全含 + 标签排除同时生效，总数正确；两页之间无重复无遗漏；导出 14 行与列表总数一致、顺序与列表一致、带 UTF-8 BOM；浏览器控制台无报错。
+**边界行为**（同一浏览器自动化逐项断言）：
+
+```
+1. 登录后            : Page 1 / 3 · 54 matching assets
+2. 无结果            : 0 matching assets，空态文案可见，上一页/下一页均禁用
+3. 零结果导出        : 0 数据行 + 表头，UTF-8 BOM 正常
+4. 筛选生效          : Page 1 / 2 · 22 matching assets，chip 为 "harbor" / + approved
+5. 点 Clear all      : 54 matching assets，搜索框清空，条件区显示"无筛选"
+6. 请求失败          : error banner 可见，列表清空，翻页按钮禁用
+7. 恢复后            : banner 隐藏，结果恢复
+8. 连点 4 次排序     : 最终选中 oldest 且首条是 Harbor at dawn（旧响应没有覆盖）
+9. 删掉一个标签 chip : 18 → 22 条
+10. 在第 2 页收窄条件: 自动回到第 1 页（18 条）
+```
+
+**规模下的耗时**（5000 个素材、5000 条 FTS 记录、每素材 1–4 个标签，SQLite 单文件）：
+
+| 操作 | 耗时 |
+|---|---|
+| 列表首页（无筛选） | 30 ms |
+| 关键词 + 双标签 + 排除 | 38–50 ms |
+| 末页（offset 4976） | 33 ms |
+| 导出全部 5000 行（707 KB） | 45 ms |
+
+这里改了一处实现：FTS 原先用 `JOIN asset_fts ON rowid = a.id`，SQLite 会把 `assets`（status 覆盖索引）当外层、对每个候选行扫一次虚拟表，5000 条时 COUNT 要 **1.35 s**；改成 `a.id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH ?)` 后 MATCH 只跑一次、外层按主键回表，降到 **4 ms**。
+
 
 ---
 
@@ -106,7 +133,7 @@ page errors  : none
 
 **① 一个查询构造器，两个出口（核心决定）**
 
-`keepstack/search.py` 里抽出 `build_query()`，返回 `(joins, where, params)`；列表接口与 CSV 导出都从它拼 SQL，只有列表额外加 `LIMIT/OFFSET`。这样"列表和导出对不上"这件事在结构上就不可能发生，而不是靠两处代码写得一样。总数统计也用同一份 WHERE 包一层 `COUNT(*)`，避免"总数"和"这一页"来自两套条件。
+`keepstack/search.py` 里抽出 `build_query()`，返回 `(where, params)`——每个筛选条件都是一个针对 `assets` 的半连接（FTS、集合、标签全部走 `a.id IN (子查询)`），所以外层永远按主键回表。列表接口与 CSV 导出都从它拼 SQL，只有列表额外加 `LIMIT/OFFSET`。这样"列表和导出对不上"这件事在结构上就不可能发生，而不是靠两处代码写得一样。总数统计也用同一份 WHERE 包一层 `COUNT(*)`，避免"总数"和"这一页"来自两套条件。
 
 **② 排序必须带唯一兜底键**
 
@@ -166,7 +193,7 @@ page errors  : none
 
 ## 5. 测试覆盖
 
-`tests/test_search_export.py`（21 个用例，独立构造 15 个素材 + 3 个集合，互不污染）：
+`tests/test_search_export.py`（25 个用例，独立构造 19 个素材 + 5 个集合，互不污染）：
 
 - 组合筛选取交集：关键词 + 集合 + 双标签 + 排除标签 + 仅 `active`；
 - 包含标签必须全含、排除标签命中任一即排除、重复标签不影响结果、同一标签同时包含与排除返回空；
@@ -175,6 +202,8 @@ page errors  : none
 - 7 个 `created_at` 完全相同的素材按每页 3 条翻页：无重复、无遗漏，且升/降序互为逆序；
 - 越界页返回空列表但总数不变，`limit/offset` 越界被夹到合法区间；
 - 导出与列表逐行一致（含跨页拼接）、零结果只有表头、逗号/引号/换行/中文往返校验、`media_type` 筛选对导出同样生效；
+- 中文关键词按词元前缀命中；含空格的标签按完整名称匹配（`tidal` 不会匹配 `tidal maps`）；
+- 同一秒内不同微秒精度的两条记录，升/降序仍是时间序；
 - HTTP 层：分页参数、401 未登录导出、`text/csv` + `attachment` + BOM、非法 `status/sort/mode` 返回 400；
 - 修改标题/描述后新的关键词能查到、加标签后组合筛选命中，且导出反映最新值（对应需求 4）。
 
@@ -184,7 +213,10 @@ page errors  : none
 
 ## 6. 已知限制 / 未完成项
 
-- 导出为同步生成，超大结果集没有分批或后台任务（题目不要求异步导出）。
-- 前端没有做筛选条件写进 URL，刷新页面后条件丢失（未在需求内，未实现）。
-- 语义搜索的排序仍按相似度，不参与 `sort` 选择；如需要可以再加。
+- **中文检索只按词元前缀命中**。`asset_fts` 沿用原有的 `porter unicode61` 分词，它不切分中文，一段连续汉字是一个词元，所以搜"港口"能命中"港口航拍"，搜"航拍"不能。题目要求"沿用现有分词方式"，因此没有引入额外分词器；要支持任意中文子串需要换 tokenizer 并重建索引（会影响既有数据）。
+- `assets.created_at` 是 TEXT 字段、按字符串排序，因此写入格式必须统一（应用写 `datetime.isoformat()` +`+00:00`）。演示脚本一开始写成 `Z` 后缀，已修正——混用格式会让同一秒内的微秒值排到前面。
+- 导出为同步内存拼接，几十万行级别会吃内存；需要时应改成流式 `StreamingResponse`。
+- 标签参数没有数量上限：1000 个标签仍能正常返回，5000 个会被 HTTP 服务层以 431 拒绝（Request Header Fields Too Large），不是应用层 400。
+- 前端没有把筛选条件写进 URL，刷新页面后条件丢失（未在需求内，未实现）。
+- 语义搜索只在接口保留（`mode=semantic`），页面不提供入口，避免"按相似度排序"与排序控件冲突。
 - 未向上游 Keepstack 提 PR（题目说明不需要）。
