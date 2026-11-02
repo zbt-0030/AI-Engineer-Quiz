@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import random
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -68,9 +69,14 @@ SPEC = [
     ("Logo mark (demo)", ["approved", "campaign"]),
 ]
 
-# Fixed timestamps; every third asset shares a timestamp with its predecessor so
-# ordering ties are guaranteed to exist.
-TIMESTAMPS = [f"2026-03-{(i // 2) + 1:02d}T{(i % 3) * 4 + 8:02d}:00:00Z" for i in range(len(SPEC))]
+# Fixed timestamps in the same format the app writes (``datetime.isoformat()``
+# with a UTC offset). assets.created_at is TEXT and sorted lexicographically, so
+# mixing formats here would quietly break ordering.
+_BASE_TS = datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc)
+# Every third asset shares a timestamp with the previous one, so ordering ties
+# are guaranteed to exist.
+TIMESTAMPS = [(_BASE_TS + timedelta(hours=i // 2, minutes=(i % 3) * 4)).isoformat()
+              for i in range(len(SPEC))]
 
 PALETTE = [(94, 132, 247), (70, 192, 138), (242, 96, 122),
            (220, 160, 60), (150, 110, 220), (60, 180, 200)]
