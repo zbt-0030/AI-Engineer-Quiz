@@ -15,7 +15,7 @@
 | 包含标签多个，必须全含 | `GROUP BY … HAVING COUNT(DISTINCT t.name) = n` | `test_include_tags_require_all_of_them` |
 | 排除标签多个，命中任一即排除 | `NOT IN (SELECT …)` | `test_exclude_tag_rejects_any_match` |
 | 各条件取交集、只返回 `active` | WHERE 全部 AND 拼接 + `a.status = ?` | `test_deleted_assets_never_surface` |
-| 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 归一化到 `strip().lower()` 后去重 | `test_tags_are_case_insensitive`、`test_duplicate_tags_*` |
+| 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 归一化到 `strip().lower()` 后去重；一个参数 = 一个完整名称（含逗号的标签不会被拆开） | `test_tags_are_case_insensitive`、`test_duplicate_tags_*`、`test_tag_containing_a_comma_is_one_name_not_two` |
 | 同一标签同时包含和排除 → 空结果 | 两个子查询天然互斥 | `test_same_tag_included_and_excluded_is_empty` |
 | 页面展示生效条件、可修改可清除 | `#active-conditions` chip（单个删除）+ Clear all | 浏览器端到端 |
 | 保留素材类型筛选并应用于导出 | 侧栏 facet → `media_type` 参数，导出同一构造器 | `test_export_honours_media_type_filter`、端到端（点 `image` → chip `type: image` → 导出 30 行全为 image） |
@@ -80,7 +80,7 @@ uv run --no-sync python -m pytest -q
 
 ## 2. 实测结果
 
-**自动化测试**：`48 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 26 个用例在 `tests/test_search_export.py`。
+**自动化测试**：`50 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 28 个用例在 `tests/test_search_export.py`。
 
 **干净克隆复现**（另起目录 `git clone` 本分支，完全按 README 的命令）：
 
@@ -88,7 +88,7 @@ uv run --no-sync python -m pytest -q
 uv venv --python 3.12
 uv pip install -e '.[dev]'
 KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false uv run --no-sync python -m pytest -q
-→ 48 passed, 2 skipped in 3.92s
+→ 50 passed, 2 skipped in 4.08s
 ```
 
 **页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`）：
@@ -136,6 +136,13 @@ page errors  : none
            条数 == total == 去重后条数，且集合与导出完全一致（6 组全部 OK）
 导出       全部匹配 20 条 == 列表 total 20；media_type=video 导出行全部是 video
 鉴权       未登录导出 → 401
+```
+
+**详情抽屉的失败路径**（拦截 `/metadata` 请求模拟失败，再恢复）：
+
+```
+失败时   : "Could not load this asset: Failed to fetch"（不再停在 Loading...）
+恢复后   : 标题与标签正常渲染（Logo mark (demo) / 2 个标签）
 ```
 
 **中文与特殊字符往返**（改标题 → 搜索 → 导出，走真实 HTTP）：
@@ -218,6 +225,8 @@ page errors  : none
 - **无 tie-breaker 的分页**：原实现 `ORDER BY created_at DESC`，同秒创建的素材跨页会重复/遗漏。
 - **特殊字符导致 500**：`_fts_query` 清洗后可能为空串，`MATCH ''` 是 SQLite 语法错误；现在按"不限制关键词"处理。
 - **`status` 参数直接透传**：现在白名单校验（`active` / `deleted`），并对 `sort`、`mode` 做同样校验，非法分页参数由 FastAPI 返回 422。
+- **详情抽屉请求失败时永远停在 "Loading..."**：`openAsset()` 三个请求并发且没有 catch，任何一次失败（断网/500/会话过期）都只留下一个控制台未捕获异常，界面卡在加载态。现在会把失败原因显示在抽屉里，并丢弃"更晚的点击/关闭之后才回来"的响应。
+- 标签过滤曾按逗号拆分参数值，而写入路径允许标签名含逗号，导致这类标签无法按整名筛选；现在一个参数就是一个完整名称（要两个标签就传两次）。
 
 未修、只记录（范围外）：
 
@@ -228,7 +237,7 @@ page errors  : none
 
 ## 5. 测试覆盖
 
-`tests/test_search_export.py`（26 个用例，跑在独立的临时库上，每个用例自建素材与集合，互不污染）：
+`tests/test_search_export.py`（28 个用例，跑在独立的临时库上，每个用例自建素材与集合，互不污染）：
 
 - 组合筛选取交集：关键词 + 集合 + 双标签 + 排除标签 + 仅 `active`；
 - 包含标签必须全含、排除标签命中任一即排除、重复标签不影响结果、同一标签同时包含与排除返回空；
@@ -238,6 +247,8 @@ page errors  : none
 - 越界页返回空列表但总数不变，`limit/offset` 越界被夹到合法区间；
 - 导出与列表逐行一致（含跨页拼接）、零结果只有表头、逗号/引号/换行/中文往返校验、`media_type` 筛选对导出同样生效；
 - 中文关键词按词元前缀命中；含空格的标签按完整名称匹配（`tidal` 不会匹配 `tidal maps`）；
+- 标签名本身含逗号（`night,shift`）时按整名命中，不会被拆成两个标签；
+- 不存在的集合 id（0、负数）返回空而不是放宽成整个库；
 - 同一秒内不同微秒精度的两条记录，升/降序仍是时间序；
 - 超过 500 个素材的集合导出（标签按 500 一批回查，跨批不能丢标签列）；
 - HTTP 层：分页参数、401 未登录导出、`text/csv` + `attachment` + BOM、非法 `status/sort/mode` 返回 400；
