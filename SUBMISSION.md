@@ -15,7 +15,7 @@
 | 包含标签多个，必须全含 | `GROUP BY … HAVING COUNT(DISTINCT t.name) = n` | `test_include_tags_require_all_of_them` |
 | 排除标签多个，命中任一即排除 | `NOT IN (SELECT …)` | `test_exclude_tag_rejects_any_match` |
 | 各条件取交集、只返回 `active` | WHERE 全部 AND 拼接 + `a.status = ?` | `test_deleted_assets_never_surface` |
-| 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 归一化到 `strip().lower()` 后去重；一个参数 = 一个完整名称（含逗号的标签不会被拆开） | `test_tags_are_case_insensitive`、`test_duplicate_tags_*`、`test_tag_containing_a_comma_is_one_name_not_two` |
+| 标签完整名称匹配、沿用现有大小写处理、重复标签不影响 | 大小写沿用写入路径的 `lower()`，名称再做 Unicode NFC 归一化后去重；一个参数 = 一个完整名称（含逗号的标签不会被拆开） | `test_tags_are_case_insensitive`、`test_duplicate_tags_*`、`test_tag_containing_a_comma_is_one_name_not_two`、`test_tag_names_are_normalised_to_nfc` |
 | 同一标签同时包含和排除 → 空结果 | 两个子查询天然互斥 | `test_same_tag_included_and_excluded_is_empty` |
 | 页面展示生效条件、可修改可清除 | `#active-conditions` chip（单个删除）+ Clear all | 浏览器端到端 |
 | 保留素材类型筛选并应用于导出 | 侧栏 facet → `media_type` 参数，导出同一构造器 | `test_export_honours_media_type_filter`、端到端（点 `image` → chip `type: image` → 导出 30 行全为 image） |
@@ -23,7 +23,7 @@
 | 上一页/下一页 + 匹配总数 + 自定每页条数 | `#page-prev/#page-next/#page-info/#page-size` | 端到端（2 页 / 14 条） |
 | 相同 `created_at` 不重不漏 | `ORDER BY created_at, a.id` | `test_pagination_is_stable_*` |
 | 改筛选或排序回到第 1 页 | 所有控件变更前置 `state.page = 1` | 端到端 |
-| 快速切换时结果对应最新条件 | `requestSeq` 自增序号，过期响应丢弃 | 代码审查 |
+| 快速切换时结果对应最新条件 | `requestSeq` 自增序号，过期响应丢弃 | 端到端（连点 4 次排序，最终选中项与首条结果都对应最后一次点击） |
 | 空结果 / 加载失败 / 非法分页 / 特殊字符 | 空态文案、error banner、422/400、输入清洗 | `test_api_rejects_invalid_parameters` 等 |
 | 页面内 CSV 导出入口 | `#btn-export` | 端到端（下载 14 行） |
 | 导出全部匹配、筛选排序与列表一致、不受当前页限制 | `export_csv()` 复用 `build_query`，无 LIMIT | `test_export_contains_every_match_in_list_order`、端到端（`page=2` 仍导 14 行） |
@@ -42,7 +42,7 @@
 
 ## 1. 运行与验证
 
-环境：Python 3.10+（本次实测 3.12.14）。依赖只有 fastapi / uvicorn / python-multipart / Pillow 与 pytest / httpx，无模型下载。注意测试用的是 `.[dev]` 里的 `httpx`：只装 `requirements.txt` 会在 `TestClient` 处报错，按题目给的 `uv pip install -e '.[dev]'` 装就不会。
+环境：Python 3.10+（本次实测 3.12.4）。依赖只有 fastapi / uvicorn / python-multipart / Pillow，测试再多 pytest / httpx（`.[dev]`），无模型下载。注意测试用的是 `.[dev]` 里的 `httpx`：只装 `requirements.txt` 会在 `TestClient` 处报错，按题目给的 `uv pip install -e '.[dev]'` 装就不会。
 
 ```bash
 uv venv --python 3.12
@@ -91,7 +91,7 @@ KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false uv run --no-sync python -
 → 52 passed, 2 skipped in 4.08s
 ```
 
-**页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`）：
+**页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`；脚本未提交进仓库，原因见本节末尾）：
 
 ```
 login ok, cards on first paint: 24
@@ -107,7 +107,9 @@ first row    : 584705f2-...,Harbor aerial view,,harbor_aerial_view.jpg,image,app
 page errors  : none
 ```
 
-**边界行为**（同一浏览器自动化逐项断言，30 个演示素材、每页 24 条）：
+上面是一次运行的原始输出：文件名里的时间戳和每行开头的 `uuid` 每次都不同，真正被断言的是 `rows`、页数与行集合。下文其他运行会看到别的文件名，属正常。
+
+**边界行为**（同一浏览器自动化逐项断言，30 个演示素材；第 1 步用默认每页 24 条，第 4 步起把每页条数切成 12）：
 
 > 只跑 `scripts/seed_demo_catalog.py` 时库里是 30 个素材；按上面"运行与验证"先跑 `python -m keepstack seed` 再跑演示脚本则是 54 个（24 + 30），下面这轮自动化只跑了演示脚本，所以总数是 30。验收场景两种情况下都是 14 条 / 2 页（每页 12 条）。
 
@@ -120,11 +122,11 @@ page errors  : none
 6. 请求失败          : error banner 可见，列表清空，翻页按钮禁用
 7. 恢复后            : banner 隐藏，结果恢复
 8. 连点 4 次排序     : 最终选中 oldest 且首条是 Harbor at dawn（旧响应没有覆盖）
-9. 删掉一个标签 chip : 18 → 22 条
+9. 删掉 campaign chip : 18 → 22 条（其余条件不变，只是变宽）
 10. 在第 2 页收窄条件: 自动回到第 1 页（18 条）
 ```
 
-**HTTP 层对抗性排查**（脚本直连运行中的服务，22 个关键词 / 9 组分页参数 / 6 组全量遍历）：
+**HTTP 层对抗性排查**（脚本直连运行中的服务，22 个关键词 / 9 组分页参数 / 6 组全量遍历；库是 54 个素材那份）：
 
 ```
 分页参数   page=0 / -1 / abc、page_size=0 / -5 / 201 / abc  → 422（FastAPI 校验，含具体字段与原因）
@@ -134,7 +136,12 @@ page errors  : none
 枚举值     status=bogus / sort=bogus / mode=bogus → 400（status=deleted 合法，返回 0 条）
 全量遍历   sort=newest / oldest（含与 q=harbor 组合、media_type、标签组合）每页 7 条翻到底：
            条数 == total == 去重后条数，且集合与导出完全一致（6 组全部 OK）
-导出       全部匹配 20 条 == 列表 total 20；media_type=video 导出行全部是 video
+导出       不传筛选：54 行 == 列表 total 54；sort=newest / oldest 各 54 行、uuid 互不重复
+           带筛选：q=harbor + approved/campaign − internal → 14 行 == total 14，
+                   再加 page=2&page_size=5 仍是 14 行（分页参数对导出无效）
+           带 media_type：image 54 行且每行 media_type 都是 image；video / audio / document 各 0 行，与 total 一致
+表头       uuid,title,description,filename,media_type,tags,created_at
+首行       "Harbor aerial view" / tags=approved|campaign / 2026-03-01T14:04:00+00:00
 鉴权       未登录导出 → 401
 ```
 
@@ -142,26 +149,38 @@ page errors  : none
 
 ```
 失败时   : "Could not load this asset: Failed to fetch"（不再停在 Loading...）
-恢复后   : 标题与标签正常渲染（Logo mark (demo) / 2 个标签）
+恢复后   : 标题与 tag 行都恢复渲染（不再是空壳）
 ```
+
+这里断言的只是"失败有提示、恢复后重新渲染成功"；具体条数取决于当时库里那个素材挂了多少标签，所以不写成固定数字。
 
 **键盘可用性与窄屏**（13 项自动检查，全过）：
 
 ```
-#search 有 aria-label；#page-info 是 role=status + aria-live=polite；错误横幅 role=alert
-侧栏 facet 行：role=button、tabindex=0、Enter 可切换、aria-pressed 跟随状态
+#search 有 aria-label；排序 / 每页条数两个 select 各有 aria-label；错误横幅 role=alert
+#page-info 是 role=status + aria-live=polite（计数变化会被读出来）
+侧栏 facet 行：role=button、tabindex=0、Tab 能落上去、Enter 可切换、aria-pressed 跟随状态
 条件 chip：aria-label="Remove condition: …"；超长标签名换行不溢出
 420px 宽度下筛选控件与导出按钮都可见，无横向滚动
 ```
 
-**交付一致性复核**：
+13 项断言逐条对应上面的描述，全过。
+
+> 说明：浏览器端的检查是用本机 Playwright 脚本跑的，**这些脚本没有提交进仓库**——它们依赖 playwright 和一个真实 Chrome，加进 `pyproject.toml` 会让 `pip install -e .` 多出浏览器下载。仓库里跑 `pytest` 的用例不依赖它们。上面的原始输出、以及「复现题目场景（页面上 5 步）」都足以手工复核同样的结论。
+
+**交付一致性复核**（临时数据目录、从 0 开始，按「运行与验证」里的顺序执行）：
 
 ```
-种子脚本连跑两次：assets 54 / collections 7 / tags 44（不重复），验收场景仍 14 条
-导出写审计日志：asset.export  detail="assets-20261102T101152.csv rows=24"
+内置 seed        : assets 24 / collections 3 / tags 41
+演示脚本第 1 次   : assets 54 / collections 4 / tags 44
+演示脚本第 2 次   : assets 54 / collections 4 / tags 44（新增 0，幂等）
+验收场景          : 列表 total 14 == 导出行数 14
+导出写审计日志    : asset.export  detail="assets-<时间戳>.csv rows=14"
 1000 个 tags 参数 -> 200；CSV 多标签单元格均按名称升序（approved|campaign）
 相对上游基线 0 个文件被删除；提交内容里无本机路径、无调试输出
 ```
+
+补一句免得踩坑：内置的 `python -m keepstack seed` 自己**不幂等**——素材按 `sha256` 去重不会重复，但 `collections` 每次都会新插一行（上游行为，本次未改，见「未修、只记录」）。连跑两次内置 seed 会看到 6 个同名集合，上面的数字是按 README 的顺序各跑一次得出的。本次新增的 `scripts/seed_demo_catalog.py` 是幂等的。
 
 **中文与特殊字符往返**（改标题 → 搜索 → 导出，走真实 HTTP）：
 
@@ -201,7 +220,7 @@ page errors  : none
 
 **③ 多标签 = AND，用子查询一次算完**
 
-包含标签：`id IN (SELECT asset_id ... WHERE name IN (?,?) GROUP BY asset_id HAVING COUNT(DISTINCT name) = 2)`；排除标签：`id NOT IN (SELECT asset_id ... WHERE name IN (?))`。没有用多个 JOIN，避免"标签重复导致行数翻倍"和"标签越多 JOIN 越多"两个坑。同一标签既包含又排除时，两个条件天然互斥，结果为空。标签名统一走写入路径已有的 `strip().lower()`，与现有大小写处理一致；重复标签先去重再算 `n`，不影响结果。
+包含标签：`id IN (SELECT asset_id ... WHERE name IN (?,?) GROUP BY asset_id HAVING COUNT(DISTINCT name) = 2)`；排除标签：`id NOT IN (SELECT asset_id ... WHERE name IN (?))`。没有用多个 JOIN，避免"标签重复导致行数翻倍"和"标签越多 JOIN 越多"两个坑。同一标签既包含又排除时，两个条件天然互斥，结果为空。标签名在写入与过滤两侧都归一化到 `lower()` + Unicode NFC（上游写入路径只做了 `lower()`，见 4.1）；重复标签先去重再算 `n`，不影响结果。
 
 **④ 关键词安全化**
 
@@ -238,22 +257,37 @@ page errors  : none
 
 ---
 
-## 4. 顺带修复的既有缺陷
+## 4. 缺陷记录
 
-- **登录在 Chrome 下完全不可用**（影响本题，必须修）：`web/app.js` 的 `api()` 在只传 `json` 时没有设置 method，`fetch` 收到带 body 的 GET 直接抛 `TypeError: Request with GET/HEAD method cannot have body`，页面表现是"Invalid credentials"，请求根本发不出去。改为带 JSON body 时默认 `POST`。
-- **关键词搜索时排序失效**：原 `search.py` 在有关键词时把 ORDER BY 固定成 `bm25(asset_fts)`，`sort` 参数被忽略；现在统一使用所选排序。
-- **无 tie-breaker 的分页**：原实现 `ORDER BY created_at DESC`，同秒创建的素材跨页会重复/遗漏。
-- **特殊字符导致 500**：`_fts_query` 清洗后可能为空串，`MATCH ''` 是 SQLite 语法错误；现在按"不限制关键词"处理。
-- **`status` 参数直接透传**：现在白名单校验（`active` / `deleted`），并对 `sort`、`mode` 做同样校验，非法分页参数由 FastAPI 返回 422。
-- **详情抽屉请求失败时永远停在 "Loading..."**：`openAsset()` 三个请求并发且没有 catch，任何一次失败（断网/500/会话过期）都只留下一个控制台未捕获异常，界面卡在加载态。现在会把失败原因显示在抽屉里，并丢弃"更晚的点击/关闭之后才回来"的响应。
-- 标签过滤曾按逗号拆分参数值，而写入路径允许标签名含逗号，导致这类标签无法按整名筛选；现在一个参数就是一个完整名称（要两个标签就传两次）。
-- 标签名此前只做 `strip().lower()`，同一个标签的合成/分解两种 Unicode 写法会被存成两条、且互相查不到；现在写入与过滤都归一化到 NFC。
-- 侧栏 facet 与标签筛选此前是 `<li>` 上的点击处理，键盘用户完全够不到；现在可 Tab 聚焦、回车切换。
+分两类：4.1 是**上游本来就有**的问题（对着基线 `3aa137c` 用 `git show` 能逐条复核），4.2 是**本次自己写错、又被自己的测试抓出来**的。分开写，是因为后者不该算在"顺手修了别人的 bug"里。
 
-未修、只记录（范围外）：
+### 4.1 上游存在、且影响本题
 
-- `pyproject.toml` 的 `Pillow>=10.0` 下限偏松。Pillow 10.3 下 `test_xmp_fields_seed_catalog_and_search` 会红（JPEG 里 XMP 段读不出来），Pillow 13 下正常，属依赖版本问题而非代码问题。若要长期稳定，建议把下限提到实际验证过的版本。
-- 导出是一次性内存拼接，几十万行级别会吃内存；需要时应改成流式 `StreamingResponse`。
+- **登录在 Chrome 下完全不可用**（影响本题，必须修）：`web/app.js` 的 `api()` 在只传 `json` 时没有设置 method，`fetch` 收到带 body 的 GET 直接抛 `TypeError: Request with GET/HEAD method cannot have body`，页面表现是"Invalid credentials"，请求根本没发出去。改为带 JSON body 时默认 `POST`。
+- **关键词搜索时排序失效**：上游 `order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, ...)`——只要有关键词就把 `sort` 参数整个忽略。
+- **无 tie-breaker 的分页**：`SORTS` 里每项只有一个表达式（如 `a.created_at DESC`），同一时间戳的素材跨页会重复或遗漏。
+- **特殊字符导致 500**：上游 `if q.strip():` 成立就拼 `asset_fts MATCH ?`，而 `_fts_query("!!!")` 清洗后是空串，`MATCH ''` 是 FTS5 语法错误。
+- **`status` / `sort` / `mode` 直接透传**：`status` 原样进 `WHERE a.status = ?`，`status=bogus` 静默返回 0 条、`status=deleted` 能读已删数据；`sort` 非法值静默回落到默认值。现在三者都做白名单校验，非法分页参数交给 FastAPI 返回 422。
+- **`if collection_id:` 用真值判断**：`collection_id=0` 会被当成"不限制集合"而返回整库，应该是"没有任何素材属于集合 0"→ 空结果。改为 `is not None`。
+- **详情抽屉请求失败时永远停在 "Loading..."**：`openAsset()` 三个请求并发且没有 catch，任何一次失败（断网 / 500 / 会话过期）只留下一个控制台未捕获异常，界面卡在加载态。现在把失败原因显示在抽屉里，并丢弃"更晚的点击或关闭之后才回来"的响应。
+- **标签名只做 `strip().lower()`**：同一个标签的合成（`café`）与分解（`cafe` + 组合重音）两种 Unicode 写法会被存成两条，且互相查不到。现在写入与过滤两侧都归一化到 NFC。
+- **侧栏 facet 是 `<li>` + `click`**（`#facet-media li` / `#facet-tags li`，无 `role`、无 `tabindex`、无按键处理），键盘用户完全够不到。
+- **若干处插值没转义**：卡片上的 `<span class="badge">${a.media_type}</span>`、`data-uuid="${a.uuid}"`、以及侧栏媒体类型的 `data-media="${m.value}"` 都是直接拼 HTML（同文件里 `title` / `alt` 却都走了 `esc()`）。`media_type` 由上传内容推断，属于外部可控输入。现在统一走 `esc()`。
+- **列表接口对可空字段返回 `null`**：`title`/`media_type`/`ext`/`alt_text` 在库里可空，`_card()` 原样回填。这不是崩溃（上游 `esc()` 已经用 `s ?? ""` 兜住了），只是同一字段在 JSON 里是 `null`、在 CSV 里是空单元格，两种表示。现在统一成 `""`。
+  - **兼容性说明**：这一条改动了既有 `GET /api/assets` 的响应形状（`null` → `""`）。仓库内的前端不受影响；如果仓库外有人靠 `x === null` 判断字段缺失，需要跟着改。
+
+### 4.2 本次实现里自己写错、又被自测抓出来的
+
+- **标签过滤按逗号拆分参数值**。多标签筛选是本次新增的能力（上游只有一个单值 `tag` 参数），第一版我图省事写成 `value.split(",")`，而写入路径允许标签名含逗号——于是 `night,shift` 这种标签永远选不中，正好违反"标签按完整名称匹配"。改成"一个参数 = 一个完整名称"。
+- **列表与导出对"字段缺失"的表示不一致**：新加的导出直接查原始列（NULL → 空单元格），列表走的 `_card()` 把 NULL 原样回填成 `null`。写 `test_missing_text_fields_come_back_as_empty_strings` 时才发现两边不是一回事，于是统一成空串——这个改动动到了既有接口的响应形状，影响写在 4.1 最后一条。
+- **测试之间互相依赖 fixture 顺序**：新加的用例单独跑就报 `no such table: collections`，加了模块级 `init_db()` 才对。
+
+### 4.3 未修、只记录（范围外）
+
+- **内置 `python -m keepstack seed` 不幂等**：素材按 `sha256` 去重（第二次 24 → 24），但 `collections` 每次都 `INSERT` 一行新 `uuid`（第二次 3 → 6，出现同名集合）。所以连跑两次内置 seed 会看到集合翻倍。本次不动它，是因为它只影响演示数据准备、不影响应用逻辑；真要修，得在 `keepstack/seed.py` 里按 `name` 先查后插。
+- `pyproject.toml` 的 `Pillow>=10.0` 下限偏松。Pillow 10.3 下 `tests/test_core.py::test_xmp_fields_seed_catalog_and_search` 会红（JPEG 里的 XMP 段读不出来），Pillow 13 下正常，属依赖版本问题而非代码问题。若要长期稳定，建议把下限提到实际验证过的版本。
+
+（其余已知限制见第 6 节，不在这里重复。）
 
 ---
 
