@@ -80,7 +80,7 @@ uv run --no-sync python -m pytest -q
 
 ## 2. 实测结果
 
-**自动化测试**：`50 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 28 个用例在 `tests/test_search_export.py`。
+**自动化测试**：`52 passed, 2 skipped`（2 个 skip 是仓库原有的、与本题无关的用例）。其中新增 30 个用例在 `tests/test_search_export.py`。
 
 **干净克隆复现**（另起目录 `git clone` 本分支，完全按 README 的命令）：
 
@@ -88,7 +88,7 @@ uv run --no-sync python -m pytest -q
 uv venv --python 3.12
 uv pip install -e '.[dev]'
 KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false uv run --no-sync python -m pytest -q
-→ 50 passed, 2 skipped in 4.08s
+→ 52 passed, 2 skipped in 4.08s
 ```
 
 **页面端到端**（Playwright 驱动本机 Chrome，无代理直连 localhost，数据目录只跑 `scripts/seed_demo_catalog.py`）：
@@ -145,6 +145,24 @@ page errors  : none
 恢复后   : 标题与标签正常渲染（Logo mark (demo) / 2 个标签）
 ```
 
+**键盘可用性与窄屏**（13 项自动检查，全过）：
+
+```
+#search 有 aria-label；#page-info 是 role=status + aria-live=polite；错误横幅 role=alert
+侧栏 facet 行：role=button、tabindex=0、Enter 可切换、aria-pressed 跟随状态
+条件 chip：aria-label="Remove condition: …"；超长标签名换行不溢出
+420px 宽度下筛选控件与导出按钮都可见，无横向滚动
+```
+
+**交付一致性复核**：
+
+```
+种子脚本连跑两次：assets 54 / collections 7 / tags 44（不重复），验收场景仍 14 条
+导出写审计日志：asset.export  detail="assets-20261102T101152.csv rows=24"
+1000 个 tags 参数 -> 200；CSV 多标签单元格均按名称升序（approved|campaign）
+相对上游基线 0 个文件被删除；提交内容里无本机路径、无调试输出
+```
+
 **中文与特殊字符往返**（改标题 → 搜索 → 导出，走真实 HTTP）：
 
 ```
@@ -159,10 +177,10 @@ page errors  : none
 | 操作 | 耗时 |
 |---|---|
 | 列表首页（无筛选） | 18 ms |
-| 关键词 + 双标签 + 排除 | 39 ms |
+| 关键词 + 双标签 + 排除 | 40 ms |
 | 末页（offset 4976） | 33 ms |
 | 侧栏 facet 统计（每次列表请求都会算） | 7.6 ms |
-| 导出全部 5000 行（707 KB） | 39 ms |
+| 导出全部 5000 行（707 KB） | 40 ms |
 
 这里改了一处实现：FTS 原先用 `JOIN asset_fts ON rowid = a.id`，SQLite 会把 `assets`（status 覆盖索引）当外层、对每个候选行扫一次虚拟表，5000 条时 COUNT 要 **1.35 s**；改成 `a.id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH ?)` 后 MATCH 只跑一次、外层按主键回表，降到 **4 ms**。
 
@@ -201,6 +219,8 @@ page errors  : none
 
 原生 JS，没有引入构建步骤或新依赖。筛选区三个控件（集合下拉、包含标签、排除标签，标签支持 datalist 补全 + 回车成 chip），生效条件以可删除 chip 回显并有 Clear all；排序下拉、上一页/下一页 + `Page X / Y · N matching assets` + 每页条数；改筛选或排序一律回到第 1 页；请求带自增序号，过期响应直接丢弃（快速切换条件时最终结果对应最新条件）；加载失败有 error banner，不残留旧结果；翻到超出范围时自动收敛到最后一页。
 
+侧栏的素材类型与标签 facet 是筛选功能的一部分，所以它们必须是键盘可操作的：`role=button` + `tabindex=0` + 回车/空格切换 + `aria-pressed`，条件 chip 带 `aria-label`（说明点它会移除什么），结果计数是 `role=status` 的 polite live region，全站有统一的焦点环。窄屏（≤880px）下标题、排序、导出换行排列，不把按钮挤到边上。
+
 **⑦ 新增组件（收益 / 成本）**
 
 | 新增 | 收益 | 成本 |
@@ -227,6 +247,8 @@ page errors  : none
 - **`status` 参数直接透传**：现在白名单校验（`active` / `deleted`），并对 `sort`、`mode` 做同样校验，非法分页参数由 FastAPI 返回 422。
 - **详情抽屉请求失败时永远停在 "Loading..."**：`openAsset()` 三个请求并发且没有 catch，任何一次失败（断网/500/会话过期）都只留下一个控制台未捕获异常，界面卡在加载态。现在会把失败原因显示在抽屉里，并丢弃"更晚的点击/关闭之后才回来"的响应。
 - 标签过滤曾按逗号拆分参数值，而写入路径允许标签名含逗号，导致这类标签无法按整名筛选；现在一个参数就是一个完整名称（要两个标签就传两次）。
+- 标签名此前只做 `strip().lower()`，同一个标签的合成/分解两种 Unicode 写法会被存成两条、且互相查不到；现在写入与过滤都归一化到 NFC。
+- 侧栏 facet 与标签筛选此前是 `<li>` 上的点击处理，键盘用户完全够不到；现在可 Tab 聚焦、回车切换。
 
 未修、只记录（范围外）：
 
@@ -237,7 +259,7 @@ page errors  : none
 
 ## 5. 测试覆盖
 
-`tests/test_search_export.py`（28 个用例，跑在独立的临时库上，每个用例自建素材与集合，互不污染）：
+`tests/test_search_export.py`（30 个用例，跑在独立的临时库上，每个用例自建素材与集合，互不污染）：
 
 - 组合筛选取交集：关键词 + 集合 + 双标签 + 排除标签 + 仅 `active`；
 - 包含标签必须全含、排除标签命中任一即排除、重复标签不影响结果、同一标签同时包含与排除返回空；
@@ -248,6 +270,8 @@ page errors  : none
 - 导出与列表逐行一致（含跨页拼接）、零结果只有表头、逗号/引号/换行/中文往返校验、`media_type` 筛选对导出同样生效；
 - 中文关键词按词元前缀命中；含空格的标签按完整名称匹配（`tidal` 不会匹配 `tidal maps`）；
 - 标签名本身含逗号（`night,shift`）时按整名命中，不会被拆成两个标签；
+- 标签名的 Unicode 归一化：`café`（合成）与 `cafe\u0301`（分解）视为同一个标签，写入与过滤两侧都归一化到 NFC；
+- 缺失的文本字段（title / media_type / ext 等为 NULL）在列表接口返回空串、导出为空单元格，而不是 `null`；
 - 不存在的集合 id（0、负数）返回空而不是放宽成整个库；
 - 同一秒内不同微秒精度的两条记录，升/降序仍是时间序；
 - 超过 500 个素材的集合导出（标签按 500 一批回查，跨批不能丢标签列）；
@@ -261,6 +285,7 @@ page errors  : none
 ## 6. 已知限制 / 未完成项
 
 - **中文检索只按词元前缀命中**。`asset_fts` 沿用原有的 `porter unicode61` 分词，它不切分中文，一段连续汉字是一个词元，所以搜"港口"能命中"港口航拍"，搜"航拍"不能。题目要求"沿用现有分词方式"，因此没有引入额外分词器；要支持任意中文子串需要换 tokenizer 并重建索引（会影响既有数据）。
+- **存量标签不会被自动归一化**。写入路径现在统一存 NFC，但在此之前已经存成分解形式（`cafe` + 组合重音）的标签行仍是原样，用合成形式去筛会查不到。SQLite 没有 normalize 函数，要清理得跑一次 Python 脚本逐行 `UPDATE tags SET name = normalize(name)`（注意合并重名行）；为了不动既有数据，这里没做迁移。
 - `assets.created_at` 是 TEXT 字段、按字符串排序，因此写入格式必须统一（应用写 `datetime.isoformat()` +`+00:00`）。演示脚本一开始写成 `Z` 后缀，已修正——混用格式会让同一秒内的微秒值排到前面。
 - 导出为同步内存拼接，几十万行级别会吃内存；需要时应改成流式 `StreamingResponse`。
 - 标签参数没有数量上限：1000 个标签仍能正常返回，5000 个会被 HTTP 服务层以 431 拒绝（Request Header Fields Too Large），不是应用层 400。
