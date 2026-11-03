@@ -56,6 +56,8 @@ uv run --no-sync python scripts/seed_demo_catalog.py   # 题目场景用的演�
 uv run --no-sync python -m keepstack
 ```
 
+补一句免得误会：`KEEPSTACK_AI_ENABLED` 默认就是 `false`，设不设都不影响关键词搜索；`KEEPSTACK_OCR_ENABLED` 默认是 `true`，关掉它才是为了避免上传素材时走 OCR。两个都写上只是让意图明确，漏掉也不会跑不起来（实测未设这两个变量时登录、列表、导出都是 200）。
+
 打开 <http://localhost:8000>，用 `admin` / `admin` 登录。
 
 跑测试：
@@ -157,6 +159,23 @@ page errors  : none
 表头       uuid,title,description,filename,media_type,tags,created_at
 首行       "Harbor aerial view" / tags=approved|campaign / 2026-03-01T14:04:00+00:00
 鉴权       未登录导出 → 401
+```
+
+另做了一轮注入与字节级检查（同一份 54 素材的库）：
+
+```
+注入       q / tags / exclude_tags / media_type 分别塞进 ' OR 1=1 --、'; DROP TABLE assets;--、
+           x')) UNION SELECT ...
+           sort=created_at; DROP TABLE assets、page=1; DROP TABLE assets
+           → 200 / 400 / 422，且 assets 表行数不变（54 → 54，仍是预编译绑定参数）
+软删除     DELETE 一个素材后：active 53 == 导出 53 == 列表总数；被删的 uuid 不在导出里；
+           status=deleted 单独能查到 1 条
+零结果导出 状态 200，BOM 在，字节里恰好 1 个 CRLF（只有表头）、没有裸 LF
+特殊标题   改成「港口, "试拍"\n第二行」→ 导出 1 行，取值与原文逐字符相等
+多标签列   三标签素材导出为 approved|campaign|internal（按名称升序、`|` 连接）
+审计       detail = "assets-<时间戳>.csv rows=17"（与那次导出的匹配数一致）
+超长词     5600 字符的关键词 → 200
+重复/空白  tags=approved&tags=approved&tags=campaign、tags=（空）、tags="  approved  " → 均 200
 ```
 
 **详情抽屉的失败路径**（拦截 `/metadata` 请求模拟失败，再恢复）：
