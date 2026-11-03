@@ -101,7 +101,7 @@ def build_query(
     exclude_tags=None,
     collection_id: Optional[int] = None,
     status: str = "active",
-) -> tuple[list[str], list[str], list]:
+) -> tuple[list[str], list]:
     """Build the shared WHERE fragments and bind parameters.
 
     All conditions intersect (AND) and every filter is expressed as a
